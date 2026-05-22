@@ -122,3 +122,18 @@ verify-check, seqcheck, and the digest while still looking alive. Fixes:
 marker that forces `/fail` every run until one lands; the append handler routes
 `_`/`.`-leading IDs to `_invalid`, and `verify-check` now flags a host whose
 events.log has gone stale (stopped appending). Three new tests; 126 pass.
+
+## Round 9 — Resource and reliability
+Audited timeouts, memory limits, dispatcher hangs, log growth, and tool
+dependencies. jq turned out genuinely unused (the watchdog emits JSON with
+printf and reads only its own flat manifests) — but five real reliability
+defects. The biggest: no log rotation at all — `runs.ndjson` grows ~1.8 GB/year
+and would fill a space-constrained host (Appendix A notes eval-host at 88%). The
+per-check `timeout` was called without `-k`, so a check ignoring SIGTERM hangs
+`timeout` itself; the 512 MB `ulimit -v` cap could strangle `aide --check`;
+there was no output-size bound; and a missing `timeout` binary silently dropped
+the per-check time guard. Fixes: dispatcher-side size-capped rotation of
+`runs.ndjson` (no logrotate dependency); `timeout -k 10`; the memory cap raised
+to a coarse 1.5 GB runaway-catcher (the systemd `MemoryMax` is the real
+run-level cgroup bound); a `ulimit -f` output cap; and an INFO finding when
+`timeout` is absent. 126 tests pass.

@@ -34,7 +34,12 @@ case "$CADENCE" in
 esac
 
 CHECK_TIMEOUT="${ONIONWARDEN_CHECK_TIMEOUT:-45}"
-CHECK_MEM_KB="${ONIONWARDEN_CHECK_MEM_KB:-524288}"   # 512 MB virtual per check
+# R9-2: ulimit -v is a coarse runaway-catcher (caps address space, not RSS) —
+# generous so `aide --check` is not strangled; the systemd unit MemoryMax is
+# the real run-level cgroup cap.
+CHECK_MEM_KB="${ONIONWARDEN_CHECK_MEM_KB:-1572864}"      # 1.5 GB address space
+CHECK_FSIZE_KB="${ONIONWARDEN_CHECK_FSIZE_KB:-524288}"   # R9-5: 512 MB output cap
+LOG_MAX_BYTES="${ONIONWARDEN_LOG_MAX_BYTES:-104857600}"  # R9-4: rotate at 100 MB
 
 RUN_ID="${ONIONWARDEN_RUN_ID:-$(now_iso | tr -d ':-')-$$}"
 export ONIONWARDEN_RUN_ID="$RUN_ID"
@@ -45,6 +50,15 @@ BASELINE_DIR=$(onionwarden_baseline_dir)
 HOST_CONF=$(onionwarden_host_conf)
 mkdir -p "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
 LOG_FILE="$LOG_DIR/runs.ndjson"
+
+# R9-4: size-capped log rotation (no logrotate dependency). Keeps one .1 file,
+# so on-disk is bounded to ~2x LOG_MAX_BYTES.
+if [ -f "$LOG_FILE" ]; then
+  _logsz=$(wc -c < "$LOG_FILE" 2>/dev/null || printf 0)
+  if [ "${_logsz:-0}" -gt "$LOG_MAX_BYTES" ]; then
+    mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+  fi
+fi
 
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-run.XXXXXX")
 FINDINGS="$RUN_DIR/findings.ndjson"; : > "$FINDINGS"
@@ -177,12 +191,20 @@ fi
 # --- run checks -----------------------------------------------------------
 run_sandboxed() {
   ( ulimit -v "$CHECK_MEM_KB" 2>/dev/null || true
+    ulimit -f "$CHECK_FSIZE_KB" 2>/dev/null || true   # R9-5: output-size cap
     if command -v timeout >/dev/null 2>&1; then
-      exec timeout "$CHECK_TIMEOUT" "$@"
+      # R9-3: -k 10 sends SIGKILL 10s after SIGTERM so a check that ignores
+      # SIGTERM cannot make `timeout` itself hang.
+      exec timeout -k 10 "$CHECK_TIMEOUT" "$@"
     else
       exec "$@"
     fi )
 }
+if ! command -v timeout >/dev/null 2>&1; then
+  dispatch_synth check_timeout INFO \
+    "coreutils 'timeout' unavailable — per-check time bound is off; only systemd TimeoutStartSec applies" \
+    "bounded" "unbounded"
+fi
 
 CHECKS_RAN=0
 for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
