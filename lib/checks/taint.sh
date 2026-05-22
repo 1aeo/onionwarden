@@ -40,6 +40,11 @@ taint_bit_info() {
 }
 
 taint_collect() {
+  # R10-3: in a container the kernel is the host's — out of scope for a guest.
+  if prof_bool is_container; then
+    printf 'na container\n'
+    return 0
+  fi
   if [ -r /proc/sys/kernel/tainted ]; then
     printf 'tainted %s\n' "$(cat /proc/sys/kernel/tainted 2>/dev/null || printf 0)"
   else
@@ -56,6 +61,10 @@ _taint_value() {
 taint_analyze() {
   local base_file=$1 cur_file=$2
   local base cur
+  if grep -q '^na ' "$cur_file" 2>/dev/null; then
+    emit_na "$CHECK_NAME" kernel_taint "$(awk '$1=="na"{print $2}' "$cur_file" | head -n1)"
+    return 0
+  fi
   base=$(_taint_value "$base_file")
   cur=$(_taint_value "$cur_file")
 

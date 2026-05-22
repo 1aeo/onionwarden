@@ -137,3 +137,19 @@ the per-check time guard. Fixes: dispatcher-side size-capped rotation of
 to a coarse 1.5 GB runaway-catcher (the systemd `MemoryMax` is the real
 run-level cgroup bound); a `ulimit -f` output cap; and an INFO finding when
 `timeout` is absent. 126 tests pass.
+
+## Round 10 — Cross-distribution & kernel-version portability
+Looked for assumptions that break across Ubuntu stock/OEM kernels and Debian
+13. systemd-version, `/proc`/`/sys`, and cgroup-v1/v2 assumptions all held up,
+and Debian 13 is genuinely covered — but three real defects. The worst is a
+`set -e` interaction: `packages_collect` runs `dpkg --verify` / `debsums -c`,
+both of which exit non-zero *precisely when they find changed files*, and the
+unwrapped pipeline aborted the collector — so on any host with a modified
+packaged file (the case worth reporting) the check silently died with a
+generic "collect failed". Also: `taint`, `kernel_state`, and `boot_integrity`
+did not detect-and-skip in a container the way `modules` does, so a
+containerised watchdog would alert on host-kernel state out of its scope; and
+`boot_integrity`'s GRUB-core block was not failure-guarded. Fixes: the
+`debsums`/`dpkg` producers are `{ ... || true; }`-wrapped; the three
+kernel/boot checks emit `na container`; the GRUB-core block guards its tools.
+Three new tests; 129 pass.

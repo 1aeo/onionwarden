@@ -16,15 +16,17 @@ CHECK_CADENCE="daily"
 
 packages_collect() {
   # Changed packaged files: debsums -c (preferred) or dpkg --verify (weaker).
+  # R10-4: both tools exit non-zero precisely when they FIND changes — the
+  # `{ ... || true; }` wrap stops that aborting the collector under set -e.
   local path corr
   if command -v debsums >/dev/null 2>&1; then
-    debsums -c 2>/dev/null | while IFS= read -r path; do
+    { debsums -c 2>/dev/null || true; } | while IFS= read -r path; do
       [ -n "$path" ] || continue
       corr=$(apt_correlate_file "$path")
       printf 'pkgfile %s %s\n' "$path" "$corr"
     done
   elif command -v dpkg >/dev/null 2>&1; then
-    dpkg --verify 2>/dev/null | awk '{print $NF}' | while IFS= read -r path; do
+    { dpkg --verify 2>/dev/null || true; } | awk '{print $NF}' | while IFS= read -r path; do
       [ -n "$path" ] || continue
       corr=$(apt_correlate_file "$path")
       printf 'pkgfile %s %s\n' "$path" "$corr"

@@ -38,6 +38,21 @@ def test_taint_unknown_bit_graceful():
     assert f[0]["severity"] == "WARN" and "unknown" in f[0]["summary"]
 
 
+def test_taint_container_skips():  # R10-3
+    f = run_analyze("taint", ["tainted 0"], ["na container"], GENERIC)
+    assert f[0]["severity"] == "NA"
+
+
+def test_kernel_state_container_skips():  # R10-3
+    f = run_analyze("kernel_state", ["kexec loaded 0"], ["na container"], GENERIC)
+    assert f[0]["severity"] == "NA"
+
+
+def test_boot_integrity_container_skips():  # R10-3
+    f = run_analyze("boot_integrity", ["cmdline ro quiet"], ["na container"], GENERIC)
+    assert f[0]["severity"] == "NA"
+
+
 # --- modules --------------------------------------------------------------
 def test_modules_positive_out_of_tree_fatal():
     f = run_analyze("modules", ["module a -", "xcheck ok"],

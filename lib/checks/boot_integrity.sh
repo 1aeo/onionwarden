@@ -15,6 +15,11 @@ CHECK_NAME="boot_integrity"
 CHECK_CADENCE="slow"
 
 boot_integrity_collect() {
+  # R10-3: a container has no boot of its own — out of scope for a guest.
+  if prof_bool is_container; then
+    printf 'na container\n'
+    return 0
+  fi
   # Secure Boot — only meaningful on EFI hosts with mokutil (detect-and-skip).
   if [ -d /sys/firmware/efi ] && command -v mokutil >/dev/null 2>&1; then
     printf 'secureboot %s\n' "$(mokutil --sb-state 2>/dev/null | tr -d '\n' | tr ' ' '_' || printf unknown)"
@@ -40,12 +45,17 @@ boot_integrity_collect() {
     done
   fi
 
-  # Legacy-BIOS GRUB core lives in the MBR gap — not a file (M4).
+  # Legacy-BIOS GRUB core lives in the MBR gap — not a file (M4). R10-2: guard
+  # the lsblk/findmnt tools so an unusual root device degrades to na, not abort.
   if [ ! -d /sys/firmware/efi ]; then
-    local bootdev
-    bootdev=$(lsblk -ndo PKNAME "$(findmnt -no SOURCE / 2>/dev/null)" 2>/dev/null | head -n1)
+    local bootdev=""
+    if command -v lsblk >/dev/null 2>&1 && command -v findmnt >/dev/null 2>&1; then
+      bootdev=$(lsblk -ndo PKNAME "$(findmnt -no SOURCE / 2>/dev/null || true)" 2>/dev/null \
+        | head -n1 || true)
+    fi
     if [ -n "$bootdev" ] && [ -r "/dev/$bootdev" ]; then
-      printf 'grubcore %s\n' "$(dd if="/dev/$bootdev" bs=512 count=2048 2>/dev/null | sha256_string "$(cat)")"
+      printf 'grubcore %s\n' \
+        "$(dd if="/dev/$bootdev" bs=512 count=2048 2>/dev/null | sha256_string "$(cat)" || true)"
     else
       printf 'grubcore na_no_bootdev\n'
     fi
@@ -60,6 +70,10 @@ boot_integrity_collect() {
 
 boot_integrity_analyze() {
   local base_file=$1 cur_file=$2
+  if grep -q '^na ' "$cur_file" 2>/dev/null; then
+    emit_na "$CHECK_NAME" boot_integrity "$(awk '$1=="na"{print $2}' "$cur_file" | head -n1)"
+    return 0
+  fi
   if [ ! -s "$base_file" ]; then
     emit_na "$CHECK_NAME" boot_integrity "no baseline boot state"
     return 0

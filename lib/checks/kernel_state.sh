@@ -21,6 +21,11 @@ kernel.yama.ptrace_scope"
 
 kernel_state_collect() {
   local v
+  # R10-3: a container shares the host kernel — out of scope for a guest.
+  if prof_bool is_container; then
+    printf 'na container\n'
+    return 0
+  fi
   # eBPF programs grouped by type.
   if command -v bpftool >/dev/null 2>&1; then
     local types t n
@@ -83,6 +88,10 @@ _ks_lockdown_rank() {
 
 kernel_state_analyze() {
   local base_file=$1 cur_file=$2
+  if grep -q '^na ' "$cur_file" 2>/dev/null; then
+    emit_na "$CHECK_NAME" kernel_state "$(awk '$1=="na"{print $2}' "$cur_file" | head -n1)"
+    return 0
+  fi
   if [ ! -s "$base_file" ]; then
     emit_na "$CHECK_NAME" kernel_state "no baseline kernel state"
     return 0
