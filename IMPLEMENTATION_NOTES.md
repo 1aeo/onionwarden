@@ -80,6 +80,31 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   watch hardcodes `/opt/onionwarden/...`; correct for a standard install, but a
   relocated install would not be watched. (Flagged in CRITIQUE_R2.)
 
+## Offline snapshot mode (Mode A dry-run)
+
+Added after the critique rounds to support refining the allowlist before any
+real deploy:
+
+- **`onionwarden-run --from-snapshot DIR`** — the dispatcher runs fully offline:
+  no live collection, it reads each check's pre-captured `DIR/<check>.current`
+  state and analyses it against a synthetic empty baseline, so every captured
+  item reports as a "new" finding (the intended bootstrap inventory, §5). No
+  alerting, heartbeat, or fatal action. A check with no captured state is
+  recorded `not_in_snapshot`.
+- **`onionwarden-snapshot HOST`** (`onionwarden snapshot HOST`) — read-only remote
+  capture. It streams a self-contained inlined collector bundle over `ssh
+  HOST 'bash -s'` — **nothing is written on the target** — runs every check's
+  collector remotely (read-only commands only, `nice`-d, per-collector
+  timeout), and splits the result into a local `snapshots/<host>-<UTC>/` tree.
+  Default is a non-root session; root-only reads (`/etc/shadow`, `sshd -T`,
+  `nft`, `/proc/*/environ`, `bpftool`, `dmidecode`) are absent and reported as
+  such. `--with-sudo` (uses `sudo -n`) is an opt-in for the operator. The tool
+  fails loud if non-interactive SSH does not work.
+
+This does not map to a specific PLAN TODO checkbox (Phase 0's offline-scan item
+is an operator step); it is dry-run tooling for building a host's first
+baseline + allowlist.
+
 ## Test & build environment
 
 - Built and tested on macOS with system `/bin/bash` **3.2** — a passing run

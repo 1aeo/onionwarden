@@ -6,6 +6,7 @@
 #   onionwarden baseline collect|diff ...  capture / compare a baseline
 #   onionwarden baseline-suggest           propose host.conf allowlist additions
 #   onionwarden detect-profile [OUT]       print the host capability profile
+#   onionwarden snapshot HOST ...          read-only remote state capture (Mode A)
 #   onionwarden arm-fatal | disarm-fatal | fatal-status | fatal-test | fatal-dry-run
 #   onionwarden suppress ...               open a physical-access maintenance window
 #   onionwarden upgrade BUNDLE             apply a signed update bundle
@@ -23,6 +24,7 @@ case "$sub" in
   baseline)        exec "$_bin_dir/onionwarden-baseline" "$@" ;;
   baseline-suggest) exec "$_bin_dir/onionwarden-baseline-suggest" "$@" ;;
   detect-profile)  exec "$_bin_dir/onionwarden-detect-profile" "$@" ;;
+  snapshot)        exec "$_bin_dir/onionwarden-snapshot" "$@" ;;
   arm-fatal)       exec "$_bin_dir/onionwarden-fatal" arm "$@" ;;
   disarm-fatal)    exec "$_bin_dir/onionwarden-fatal" disarm "$@" ;;
   fatal-status)    exec "$_bin_dir/onionwarden-fatal" status "$@" ;;

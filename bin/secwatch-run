@@ -27,11 +27,29 @@ ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
 [ -f "$ONIONWARDEN_ROOT/lib/suppress.sh" ] && . "$ONIONWARDEN_ROOT/lib/suppress.sh"
 [ -f "$ONIONWARDEN_ROOT/lib/fatal.sh" ]    && . "$ONIONWARDEN_ROOT/lib/fatal.sh"
 
-CADENCE="${1:-fast}"
-case "$CADENCE" in
-  fast|slow|daily) ;;
-  *) die "usage: onionwarden-run fast|slow|daily" ;;
-esac
+# Args: a cadence (fast|slow|daily) and/or --from-snapshot DIR.
+#
+# --from-snapshot DIR puts the dispatcher in OFFLINE mode: it never runs a
+# live collector, it reads each check's pre-captured state from DIR/<check>.current
+# (typically produced by bin/onionwarden-snapshot from a read-only remote pull),
+# and it analyses every check regardless of cadence. With no baseline, every
+# current item shows as a "new" finding — that is the intended bootstrap
+# inventory (PLAN §5). Offline mode does no alerting, heartbeat, or fatal action.
+CADENCE=""
+FROM_SNAPSHOT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    fast|slow|daily) CADENCE=$1; shift ;;
+    --from-snapshot) FROM_SNAPSHOT=$2; shift 2 ;;
+    *) die "usage: onionwarden-run [fast|slow|daily] [--from-snapshot DIR]" ;;
+  esac
+done
+[ -n "$CADENCE" ] || CADENCE="fast"
+SNAPSHOT_MODE="no"
+if [ -n "$FROM_SNAPSHOT" ]; then
+  [ -d "$FROM_SNAPSHOT" ] || die "onionwarden-run: --from-snapshot dir not found: $FROM_SNAPSHOT"
+  SNAPSHOT_MODE="yes"
+fi
 
 CHECK_TIMEOUT="${ONIONWARDEN_CHECK_TIMEOUT:-45}"
 # R9-2: ulimit -v is a coarse runaway-catcher (caps address space, not RSS) —
@@ -76,6 +94,13 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 # --- config ---------------------------------------------------------------
+# Snapshot mode runs unfiltered (no host.conf, no allowlists) so the inventory
+# shows everything — that is the raw material for building the allowlist.
+if [ "$SNAPSHOT_MODE" = "yes" ] && [ ! -f "$HOST_CONF" ]; then
+  HOST_CONF="$RUN_DIR/host.conf"
+  printf 'host_id = "%s"\nrole = "generic"\n' \
+    "$(basename "$FROM_SNAPSHOT" | tr -cd 'A-Za-z0-9_.-')" > "$HOST_CONF"
+fi
 [ -f "$HOST_CONF" ] || die "onionwarden-run: host.conf missing: $HOST_CONF"
 cfg_load "$HOST_CONF" "$ONIONWARDEN_ROOT/roles"
 export _CFG_STORE
@@ -94,9 +119,16 @@ dispatch_synth() {
 
 # --- profile --------------------------------------------------------------
 PROFILE_FILE="$RUN_DIR/profile.state"
+if [ "$SNAPSHOT_MODE" = "yes" ]; then
+  # Offline: the profile comes from the snapshot.
+  if [ -f "$FROM_SNAPSHOT/profile.state" ]; then
+    cp "$FROM_SNAPSHOT/profile.state" "$PROFILE_FILE"
+  else
+    : > "$PROFILE_FILE"
+  fi
 # Replay seam: ONIONWARDEN_PROFILE_FILE supplies a pre-captured profile (used by
 # the test suite to exercise the dispatcher with a Linux profile on any host).
-if [ -n "${ONIONWARDEN_PROFILE_FILE:-}" ] && [ -f "${ONIONWARDEN_PROFILE_FILE:-}" ]; then
+elif [ -n "${ONIONWARDEN_PROFILE_FILE:-}" ] && [ -f "${ONIONWARDEN_PROFILE_FILE:-}" ]; then
   cp "$ONIONWARDEN_PROFILE_FILE" "$PROFILE_FILE"
 elif ! "$_bin_dir/onionwarden-detect-profile" "$PROFILE_FILE" >/dev/null 2>&1; then
   profile_detect > "$PROFILE_FILE" 2>/dev/null || : > "$PROFILE_FILE"
@@ -105,7 +137,7 @@ prof_load "$PROFILE_FILE"
 export _PROF_FILE="$PROFILE_FILE"
 
 REFUSE_RUN="no"
-if [ "$(prof_get os_supported true)" = "false" ]; then
+if [ "$SNAPSHOT_MODE" != "yes" ] && [ "$(prof_get os_supported true)" = "false" ]; then
   dispatch_synth unsupported_os CRIT \
     "onionwarden refuses to run on unsupported OS '$(prof_get os_id)'" "ubuntu/debian" "$(prof_get os_id)" true
   REFUSE_RUN="yes"
@@ -119,30 +151,46 @@ fi
 export ONIONWARDEN_SUPPRESS_PHYSICAL
 
 # --- trust state (signed baseline + host.conf) ----------------------------
+TRUST="trusted"
+BASELINE_USE="$BASELINE_DIR"
+HOSTCONF_SIGNED="no"
+BOOTSTRAPPING="no"
+ANALYZE="yes"
+
+if [ "$SNAPSHOT_MODE" = "yes" ]; then
+  # Offline inventory: no signed baseline, no host.conf trust. Every check is
+  # analysed against a synthetic empty baseline so every current item reports
+  # as a "new" finding — the intended bootstrap inventory (PLAN §5). `tainted 0`
+  # seeds the taint check so relay-a's set bits decode as newly-set.
+  TRUST="snapshot"
+  BASELINE_USE="$RUN_DIR/_snapshot_baseline"
+  mkdir -p "$BASELINE_USE/state"
+  printf '# onionwarden snapshot inventory — empty baseline\ntainted 0\n' \
+    > "$BASELINE_USE/state/_marker.state"
+fi
+
 # R2-1: copy the baseline into the run's private tmpdir, then verify and use
 # the COPY — so the bytes that were hash-verified are exactly the bytes the
 # checks read. Verifying the on-disk baseline and reading it later is a TOCTOU
 # (the baseline dir is intentionally not immutable).
-TRUST="trusted"
-BASELINE_USE="$BASELINE_DIR"
-if [ -d "$BASELINE_DIR" ]; then
-  cp -R "$BASELINE_DIR" "$RUN_DIR/baseline" 2>/dev/null && BASELINE_USE="$RUN_DIR/baseline"
-fi
-if [ ! -f "$BASELINE_USE/manifest.json" ]; then
-  TRUST="nobaseline"
-elif ! baseline_verify "$BASELINE_USE" "$PUBKEY" 2>/dev/null; then
-  TRUST="badbaseline"
-fi
-HOSTCONF_SIGNED="no"
-if [ -f "$HOST_CONF.sig" ] && onionwarden_verify_artifact "$PUBKEY" "$HOST_CONF" 2>/dev/null; then
-  HOSTCONF_SIGNED="yes"
+if [ "$SNAPSHOT_MODE" != "yes" ]; then
+  if [ -d "$BASELINE_DIR" ]; then
+    cp -R "$BASELINE_DIR" "$RUN_DIR/baseline" 2>/dev/null && BASELINE_USE="$RUN_DIR/baseline"
+  fi
+  if [ ! -f "$BASELINE_USE/manifest.json" ]; then
+    TRUST="nobaseline"
+  elif ! baseline_verify "$BASELINE_USE" "$PUBKEY" 2>/dev/null; then
+    TRUST="badbaseline"
+  fi
+  if [ -f "$HOST_CONF.sig" ] && onionwarden_verify_artifact "$PUBKEY" "$HOST_CONF" 2>/dev/null; then
+    HOSTCONF_SIGNED="yes"
+  fi
+  [ -f "$STATE_DIR/bootstrapping" ] && BOOTSTRAPPING="yes"
 fi
 
-BOOTSTRAPPING="no"
-[ -f "$STATE_DIR/bootstrapping" ] && BOOTSTRAPPING="yes"
-
-ANALYZE="yes"
-if [ "$TRUST" != "trusted" ] || [ "$HOSTCONF_SIGNED" != "yes" ]; then
+if [ "$SNAPSHOT_MODE" = "yes" ]; then
+  : # offline inventory — skip the trust gate entirely
+elif [ "$TRUST" != "trusted" ] || [ "$HOSTCONF_SIGNED" != "yes" ]; then
   if [ "$BOOTSTRAPPING" = "yes" ]; then
     # M2: suppress signature-CRIT until the first signed round-trip.
     dispatch_synth bootstrapping INFO \
@@ -213,7 +261,10 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
   name=$(basename "$cf" .sh)
   cad=$(bash "$cf" cadence 2>/dev/null || printf 'unknown')
   [ "$cad" = "boot" ] && cad="slow"
-  [ "$cad" = "$CADENCE" ] || continue
+  # Snapshot mode analyses every check regardless of cadence.
+  if [ "$SNAPSHOT_MODE" != "yes" ] && [ "$cad" != "$CADENCE" ]; then
+    continue
+  fi
 
   if cfg_list_has disable_checks "$name"; then
     DISABLED_COUNT=$(( DISABLED_COUNT + 1 ))
@@ -224,10 +275,20 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
   CHECKS_RAN=$(( CHECKS_RAN + 1 ))
 
   cur="$RUN_DIR/$name.current"
+  # Offline snapshot mode: the current state comes from the snapshot dir; a
+  # check with no captured state is recorded as not_in_snapshot, never collected.
+  if [ "$SNAPSHOT_MODE" = "yes" ]; then
+    if [ -f "$FROM_SNAPSHOT/$name.current" ]; then
+      cp "$FROM_SNAPSHOT/$name.current" "$cur"
+    else
+      printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"not_in_snapshot"}\n' \
+        "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+      continue
+    fi
   # Replay seam: ONIONWARDEN_FAKE_STATE_DIR supplies pre-captured current state,
   # used by the test suite to drive the full dispatcher path deterministically
   # (and usable for offline replay of a captured host).
-  if [ -n "${ONIONWARDEN_FAKE_STATE_DIR:-}" ] && [ -f "$ONIONWARDEN_FAKE_STATE_DIR/$name.current" ]; then
+  elif [ -n "${ONIONWARDEN_FAKE_STATE_DIR:-}" ] && [ -f "$ONIONWARDEN_FAKE_STATE_DIR/$name.current" ]; then
     cp "$ONIONWARDEN_FAKE_STATE_DIR/$name.current" "$cur"
   elif [ "$name" = "profile" ]; then
     cp "$PROFILE_FILE" "$cur"
@@ -244,8 +305,12 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     continue
   fi
 
-  base=$(baseline_state_file "$BASELINE_USE" "$name")
-  [ -n "$base" ] || base="/dev/null"
+  if [ "$SNAPSHOT_MODE" = "yes" ]; then
+    base="$BASELINE_USE/state/_marker.state"   # synthetic empty baseline
+  else
+    base=$(baseline_state_file "$BASELINE_USE" "$name")
+    [ -n "$base" ] || base="/dev/null"
+  fi
   run_sandboxed bash "$cf" analyze --baseline "$base" --current "$cur" \
     >> "$FINDINGS" 2>/dev/null || \
     dispatch_synth "check_${name}" WARN "check '$name' analyze failed or timed out" "ran" "failed"
@@ -273,6 +338,13 @@ CLEAN_COUNT=$(( CHECKS_RAN - DEVIATION_COUNT ))
 printf '{"type":"run_summary","ts":"%s","run_id":"%s","host_id":"%s","cadence":"%s","severity":"%s","checks_ran":%s,"findings":%s,"na":%s,"disabled":%s,"trust":"%s"}\n' \
   "$(now_iso)" "$RUN_ID" "$HOST_ID" "$CADENCE" "$RUN_MAX_SEV" \
   "$CHECKS_RAN" "$FINDING_COUNT" "$NA_COUNT" "$DISABLED_COUNT" "$TRUST" >> "$LOG_FILE"
+
+# --- snapshot mode: offline inventory, no alerting/fatal/heartbeat ---------
+if [ "$SNAPSHOT_MODE" = "yes" ]; then
+  cp "$FINDINGS" "$FROM_SNAPSHOT/findings.ndjson" 2>/dev/null || true
+  log_info "onionwarden-run --from-snapshot complete: $FINDING_COUNT finding(s), $CHECKS_RAN checks analysed (offline inventory, no alerts)"
+  exit 0
+fi
 
 # --- dry-run mode: collect+analyze only, no side effects (onionwarden-fatal) --
 if [ "${ONIONWARDEN_DRYRUN:-0}" = "1" ]; then

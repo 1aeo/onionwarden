@@ -122,6 +122,37 @@ def test_bad_baseline_signature_is_crit(tree):
     assert "baseline_signature" in log
 
 
+def test_from_snapshot_offline_inventory(tmp_path):
+    """--from-snapshot runs every check offline against the snapshot, with no
+    baseline, so every captured item reports as a 'new' finding."""
+    snap = tmp_path / "snap"; snap.mkdir()
+    (snap / "profile.state").write_text("os_id=ubuntu\nos_supported=true\n")
+    (snap / "profile.current").write_text("os_id=ubuntu\nos_supported=true\n")
+    (snap / "taint.current").write_text("tainted 4096\n")
+    (snap / "modules.current").write_text("module nf_tables -\nmodule evil O\nxcheck ok\n")
+    (snap / "ports.current").write_text("listener tcp 0.0.0.0 9001 tor\n")
+    log = tmp_path / "log"; log.mkdir()
+    env = {**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
+           "ONIONWARDEN_LOG_DIR": str(log),
+           "ONIONWARDEN_VAR_DIR": str(tmp_path / "var"),
+           "ONIONWARDEN_CONF_DIR": str(tmp_path / "noconf"),
+           "ONIONWARDEN_RUN_ID": "snap-test"}
+    proc = subprocess.run(
+        [BASH, str(ROOT / "bin" / "onionwarden-run"), "--from-snapshot", str(snap)],
+        capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    log_text = (log / "runs.ndjson").read_text()
+    s = json.loads([l for l in log_text.splitlines()
+                    if '"run_summary"' in l][-1])
+    assert s["trust"] == "snapshot"
+    # every captured item is "new" against the empty baseline
+    assert '"check":"taint"' in log_text and '"severity":"CRIT"' in log_text
+    assert "evil" in log_text          # the module shows as new
+    assert "9001" in log_text          # the listener shows as new
+    # checks with no snapshot data are recorded, not collected live
+    assert '"status":"not_in_snapshot"' in log_text
+
+
 def test_bootstrapping_transition_clears_marker(tree):
     """A first fully-verified run ends the bootstrapping state (M2)."""
     (tree["var"] / "state" / "bootstrapping").touch()

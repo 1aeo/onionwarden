@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# bin/onionwarden-snapshot — read-only remote state capture (Mode A dry-run).
+#
+# SSHes into a target host, runs every check's collector remotely, and gathers
+# the per-check state into a local snapshot directory. The dispatcher can then
+# analyse it offline with `onionwarden-run --from-snapshot`.
+#
+# STRICTLY READ-ONLY on the target:
+#   - the collector code is streamed over SSH stdin (`bash -s`) — NO file is
+#     ever written on the target;
+#   - every collector runs only read commands (cat/ip/ss/find/dpkg-query/...);
+#   - the remote run is wrapped `timeout ... nice -n19` to stay polite;
+#   - default is a non-root session — collectors that need root degrade and
+#     the gap is reported. `--with-sudo` (sudo -n) is opt-in for the operator.
+#
+# Usage: onionwarden-snapshot HOST [--out DIR] [--with-sudo] [--ssh-opt OPT]...
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd)
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+
+HOST=""
+OUT=""
+WITH_SUDO=0
+SSH_OPTS=()
+REMOTE_TIMEOUT="${ONIONWARDEN_SNAPSHOT_TIMEOUT:-900}"
+PERCHECK_TIMEOUT="${ONIONWARDEN_SNAPSHOT_PERCHECK:-60}"
+
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --out)       OUT=$2; shift 2 ;;
+    --with-sudo) WITH_SUDO=1; shift ;;
+    --ssh-opt)   SSH_OPTS+=( "$2" ); shift 2 ;;
+    -h|--help)   usage 0 ;;
+    -*)          echo "onionwarden-snapshot: unknown option: $1" >&2; usage 1 ;;
+    *)           [ -z "$HOST" ] || die "only one HOST may be given"; HOST=$1; shift ;;
+  esac
+done
+[ -n "$HOST" ] || { echo "onionwarden-snapshot: HOST is required" >&2; usage 1; }
+
+[ -n "$OUT" ] || OUT="$ONIONWARDEN_ROOT/snapshots/${HOST}-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$OUT/raw"
+
+_ssh() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+    ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$HOST" "$@"
+}
+
+# --- preflight: a non-interactive SSH session must work, or fail loud --------
+log_info "snapshot: preflight — testing non-interactive SSH to '$HOST'"
+if ! _ssh true >/dev/null 2>&1; then
+  die "cannot SSH to '$HOST' non-interactively (BatchMode). Configure key-based SSH first — refusing to degrade."
+fi
+REMOTE_USER=$(_ssh 'id -un' 2>/dev/null || printf 'unknown')
+REMOTE_UID=$(_ssh 'id -u' 2>/dev/null || printf 'unknown')
+REMOTE_OS=$(_ssh '. /etc/os-release 2>/dev/null; printf "%s %s" "${ID:-?}" "${VERSION_ID:-?}"' 2>/dev/null || printf 'unknown')
+log_info "snapshot: connected — remote user=$REMOTE_USER uid=$REMOTE_UID os=$REMOTE_OS"
+
+if [ "$WITH_SUDO" = 1 ]; then
+  if ! _ssh 'sudo -n true' >/dev/null 2>&1; then
+    die "--with-sudo requested but 'sudo -n' is not available for $REMOTE_USER on $HOST — refusing to degrade."
+  fi
+  log_info "snapshot: --with-sudo enabled (sudo -n confirmed)"
+fi
+
+# --- build the self-contained collector bundle ------------------------------
+# Inline every lib + check, stripping the inter-file `source` statements and
+# the per-check CLI shim, then append a driver. The result is one stream that
+# `bash -s` runs entirely from stdin — nothing is written on the target.
+BUNDLE=$(mktemp "${TMPDIR:-/tmp}/onionwarden-bundle.XXXXXX")
+trap 'rm -f "$BUNDLE"' EXIT
+
+_strip() {
+  # drop `. "..."` source statements and the trailing `if [ BASH_SOURCE = $0 ]`
+  # CLI shim (3 lines); keep everything else.
+  awk '
+    /^[[:space:]]*\. "/ { next }
+    index($0, "\"${BASH_SOURCE[0]}\" = \"${0:-}\"") { sk = 3 }
+    sk > 0 { sk--; next }
+    { print }
+  ' "$1"
+}
+
+CHECK_NAMES=""
+for c in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
+  CHECK_NAMES="$CHECK_NAMES $(basename "$c" .sh)"
+done
+
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'set -uo pipefail\n'           # NOT -e: one bad collector must not abort
+  printf 'export ONIONWARDEN_ROOT=/nonexistent-remote\n'
+  for lib in common config profile apt_correlate check_runtime; do
+    _strip "$ONIONWARDEN_ROOT/lib/$lib.sh"
+  done
+  for c in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
+    _strip "$c"
+  done
+  printf 'set +e\n'
+  printf '__PERCHECK=%s\n' "$PERCHECK_TIMEOUT"
+  # Per-collector timeout: one slow collector (e.g. network_deep on a relay
+  # with thousands of connections) must not starve the rest. Each collector
+  # runs backgrounded with a sleep-kill watchdog.
+  cat <<'__SNAPFN__'
+__snap() {
+  printf '###ONIONWARDEN-SNAPSHOT:%s###\n' "$1"
+  ( "${1}_collect" 2>/dev/null ) &
+  __p=$!
+  ( sleep "$__PERCHECK"; kill -TERM "$__p" 2>/dev/null; sleep 3; kill -KILL "$__p" 2>/dev/null ) 2>/dev/null &
+  __w=$!
+  wait "$__p" 2>/dev/null
+  kill "$__w" 2>/dev/null; wait "$__w" 2>/dev/null
+  printf '###ONIONWARDEN-SNAPSHOT-END:%s###\n' "$1"
+}
+__SNAPFN__
+  # The `profile` check's collector IS profile_detect, so the loop below
+  # produces profile.current; the tool copies it to profile.state afterwards.
+  printf 'for __c in%s; do __snap "$__c"; done\n' "$CHECK_NAMES"
+} > "$BUNDLE"
+
+if ! bash -n "$BUNDLE" 2>/dev/null; then
+  die "snapshot: generated collector bundle failed syntax check — aborting (no SSH attempted)"
+fi
+log_info "snapshot: collector bundle built ($(wc -l < "$BUNDLE" | tr -d ' ') lines)"
+
+# --- run the bundle remotely, read-only -------------------------------------
+REMOTE_CMD="timeout ${REMOTE_TIMEOUT} nice -n 19 bash -s"
+[ "$WITH_SUDO" = 1 ] && REMOTE_CMD="sudo -n $REMOTE_CMD"
+log_info "snapshot: running collectors on $HOST (read-only; $REMOTE_CMD)"
+
+RAW="$OUT/raw/remote-collect.log"
+if ! _ssh "$REMOTE_CMD" < "$BUNDLE" > "$RAW" 2>"$OUT/raw/remote-stderr.log"; then
+  log_warn "snapshot: remote collection exited non-zero — partial data; see raw/remote-stderr.log"
+fi
+[ -s "$RAW" ] || die "snapshot: remote collection produced no output — aborting"
+
+# --- split the delimited stream into per-check state files ------------------
+awk -v dir="$OUT" '
+  /^###ONIONWARDEN-SNAPSHOT:/ {
+    name = $0; sub(/^###ONIONWARDEN-SNAPSHOT:/, "", name); sub(/###$/, "", name)
+    out = dir "/" name ".current"; printf "" > out; next
+  }
+  /^###ONIONWARDEN-SNAPSHOT-END:/ { out = ""; next }
+  out { print >> out }
+' "$RAW"
+
+# profile.current mirrors profile.state (the dispatcher needs both).
+if [ -f "$OUT/profile.current" ]; then
+  cp "$OUT/profile.current" "$OUT/profile.state"
+fi
+
+{
+  printf 'host=%s\n' "$HOST"
+  printf 'captured_at=%s\n' "$(now_iso)"
+  printf 'remote_user=%s\n' "$REMOTE_USER"
+  printf 'remote_uid=%s\n' "$REMOTE_UID"
+  printf 'remote_os=%s\n' "$REMOTE_OS"
+  printf 'with_sudo=%s\n' "$WITH_SUDO"
+  printf 'mode=%s\n' "$( [ "$REMOTE_UID" = 0 ] && printf root || printf read-only-nonroot )"
+} > "$OUT/raw/meta.txt"
+
+# --- report -----------------------------------------------------------------
+echo
+echo "=== snapshot complete: $OUT ==="
+echo "host=$HOST user=$REMOTE_USER uid=$REMOTE_UID os=$REMOTE_OS with_sudo=$WITH_SUDO"
+complete=0; empty=0; na=0
+for f in "$OUT"/*.current; do
+  [ -f "$f" ] || continue
+  n=$(basename "$f" .current)
+  if [ ! -s "$f" ]; then
+    printf '  %-18s EMPTY (no data — likely permission-blocked or N/A)\n' "$n"
+    empty=$(( empty + 1 ))
+  elif grep -q '^na ' "$f" 2>/dev/null || grep -q ' na ' "$f" 2>/dev/null; then
+    printf '  %-18s N/A — %s\n' "$n" "$(grep -m1 'na ' "$f" | cut -c1-60)"
+    na=$(( na + 1 ))
+  else
+    printf '  %-18s OK (%s lines)\n' "$n" "$(wc -l < "$f" | tr -d ' ')"
+    complete=$(( complete + 1 ))
+  fi
+done
+echo "--- $complete with data, $na N/A, $empty empty ---"
+[ "$REMOTE_UID" != 0 ] && [ "$WITH_SUDO" != 1 ] && \
+  echo "NOTE: read-only non-root capture — root-only reads (/etc/shadow, sshd -T," \
+       "nft ruleset, /proc/*/environ, bpftool, dmidecode) are absent. Re-run" \
+       "--with-sudo (operator approval) to fill those."
+echo
+echo "Next: onionwarden-run --from-snapshot '$OUT'"
