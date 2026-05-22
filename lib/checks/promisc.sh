@@ -61,8 +61,10 @@ promisc_analyze() {
 
   local line name kind promisc flagprom master
   local b_promisc b_flagprom sev fatal summary virt_ok
+  # R6-3: a hypervisor host tolerates promiscuity churn even if the operator
+  # did not set allow_virt_churn (PLAN §0.2 — is_hypervisor itself implies it).
   virt_ok=false
-  cfg_bool allow_virt_churn && virt_ok=true
+  if cfg_bool allow_virt_churn || prof_bool is_hypervisor; then virt_ok=true; fi
 
   while IFS= read -r line; do
     case "$line" in iface\ *) ;; *) continue ;; esac
@@ -72,12 +74,20 @@ promisc_analyze() {
     flagprom=$(printf '%s' "$line" | awk '{print $5}')
     master=$(printf '%s' "$line" | awk '{print $6}')
 
-    # Cross-check disagreement between ip and sysfs — possible hiding.
+    # Cross-check disagreement between ip and sysfs. On a PHYSICAL NIC this is
+    # possible hiding -> CRIT+fatal. On a virtual interface a transient
+    # disagreement during container/VM churn is plausible (R6-2) -> WARN.
     if { [ "${promisc:-0}" -gt 0 ] && [ "${flagprom:-0}" -eq 0 ]; } \
        || { [ "${promisc:-0}" -eq 0 ] && [ "${flagprom:-0}" -eq 1 ]; }; then
-      emit_finding "$CHECK_NAME" promisc_xcheck CRIT \
-        "interface '$name' promiscuity disagrees between ip(-d link) and sysfs flags — possible hiding" \
-        "consistent" "ip=$promisc sysfs=$flagprom" true
+      if [ "$kind" = "physical" ]; then
+        emit_finding "$CHECK_NAME" promisc_xcheck CRIT \
+          "physical NIC '$name' promiscuity disagrees between ip(-d link) and sysfs flags — possible hiding" \
+          "consistent" "ip=$promisc sysfs=$flagprom" true
+      else
+        emit_finding "$CHECK_NAME" promisc_xcheck WARN \
+          "interface '$name' ($kind) promiscuity disagrees between ip and sysfs — likely churn" \
+          "consistent" "ip=$promisc sysfs=$flagprom" false
+      fi
     fi
 
     _promisc_on "$promisc" "$flagprom" || continue
@@ -93,7 +103,13 @@ promisc_analyze() {
       physical)
         if [ "$master" != "-" ]; then
           sev="WARN"; fatal=false
-          summary="physical NIC '$name' is promiscuous but is a bridge member (master $master) — expected for a bridge port"
+          summary="physical NIC '$name' is promiscuous but is a bridge/bond member (master $master) — expected"
+        elif [ "$virt_ok" = true ]; then
+          # R6-1: on a virtualization host a physical NIC legitimately goes
+          # promiscuous as the lower device of a macvtap/macvlan or a bridge
+          # uplink — WARN, not a fatal #9.
+          sev="WARN"; fatal=false
+          summary="physical NIC '$name' promiscuous on a virtualization host (macvtap/bridge-uplink?) — review, not auto-fatal"
         else
           sev="CRIT"; fatal=true
           summary="physical NIC '$name' entered promiscuous mode and is not a bridge member — LAN sniffing"

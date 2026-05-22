@@ -78,3 +78,18 @@ allowlist; input_devices now also diffs `journalctl -k` input-registration
 lines (durable for the boot, so a since-unplugged device is still caught);
 console_login now also parses `last` for closed `tty[0-9]` sessions. Three new
 tests; 119 pass.
+
+## Round 6 — PROMISC detection
+Stress-tested the promiscuous-interface check against virtualization edge
+cases. The virtual-kind classification was sound (veth/tap/vnet/bridge/
+wireguard/ifb/macvtap/vlan all excluded from fatal #9). But three real defects:
+a physical NIC carrying a macvtap/macvlan child legitimately goes promiscuous,
+and the check flagged that parent as fatal #9 — `allow_virt_churn` only
+excluded the `virtual:*` branch, never a physical NIC promiscuous for a virtual
+reason. The ip-vs-sysfs cross-check fired CRIT+fatal for every interface,
+including a flapping veth where a transient disagreement is churn not hiding.
+And virt-churn tolerance keyed only on the `allow_virt_churn` config flag, not
+the `is_hypervisor` profile bit that PLAN §0.2 says should imply it. Fixes:
+a physical NIC promiscuous on a virt-churn-tolerant host is WARN not fatal; the
+cross-check is CRIT+fatal only for physical interfaces; tolerance is now
+`allow_virt_churn OR is_hypervisor`. Four new tests; 123 pass.

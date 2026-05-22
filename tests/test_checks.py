@@ -174,6 +174,27 @@ def test_promisc_xcheck_disagree_fatal():
     assert any(x["signal"] == "promisc_xcheck" and x["fatal_candidate"] for x in f)
 
 
+def test_promisc_allow_virt_churn_demotes_physical():  # R6-1
+    cfg = GENERIC + "allow_virt_churn = true\n"
+    f = run_analyze("promisc", ["iface eth0 physical 0 0 -"],
+                    ["iface eth0 physical 1 1 -"], cfg)
+    assert f[0]["severity"] == "WARN" and f[0]["fatal_candidate"] is False
+
+
+def test_promisc_hypervisor_profile_demotes_physical():  # R6-3
+    f = run_analyze("promisc", ["iface eth0 physical 0 0 -"],
+                    ["iface eth0 physical 1 1 -"], GENERIC,
+                    profile=["is_hypervisor=true"])
+    assert f[0]["severity"] == "WARN" and f[0]["fatal_candidate"] is False
+
+
+def test_promisc_virtual_xcheck_not_fatal():  # R6-2
+    f = run_analyze("promisc", ["iface veth0 virtual:veth 0 0 -"],
+                    ["iface veth0 virtual:veth 0 1 -"], GENERIC)
+    xc = [x for x in f if x["signal"] == "promisc_xcheck"]
+    assert xc and xc[0]["severity"] == "WARN" and xc[0]["fatal_candidate"] is False
+
+
 # --- input_devices --------------------------------------------------------
 def test_input_devices_positive_fatal():
     f = run_analyze("input_devices", ["collected ok"],
