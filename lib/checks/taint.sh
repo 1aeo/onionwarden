@@ -24,6 +24,7 @@ taint_bit_info() {
     5)  printf 'B|WARN|bad page detected' ;;
     6)  printf 'U|WARN|userspace-requested taint' ;;
     7)  printf 'D|WARN|kernel died (oops/BUG)' ;;
+    8)  printf 'A|WARN|ACPI table overridden' ;;
     9)  printf 'W|WARN|kernel warning issued' ;;
     10) printf 'C|WARN|staging driver loaded' ;;
     11) printf 'I|INFO|firmware-bug workaround' ;;
@@ -32,6 +33,7 @@ taint_bit_info() {
     14) printf 'L|WARN|soft lockup occurred' ;;
     15) printf 'K|CRIT|kernel live-patched' ;;
     16) printf 'X|WARN|auxiliary (distro-defined)' ;;
+    17) printf 'T|WARN|module built with a different struct-randomization seed' ;;
     18) printf 'N|INFO|in-kernel test (kunit) ran' ;;
     *)  printf '' ;;
   esac
@@ -88,33 +90,43 @@ taint_analyze() {
       sev=${info#*|}; sev=${sev%%|*}
       meaning=${info##*|}
       fatal=false
-      # Documented carve-outs: K (live-patch) is never fatal, and any letter
-      # the operator allowlisted (OEM out-of-tree modules etc.) is demoted.
+      # Carve-out (R7-1): a letter the operator allowlisted in
+      # expected_taint_bits is demoted to INFO — this is the OPT-IN path for
+      # both an applied livepatch (K) and OEM out-of-tree modules (O). Absent
+      # that declaration, K is CRIT+fatal like any other CRIT bit: an
+      # unexpected kernel live-patch is a rootkit technique, not a WARN.
       if cfg_list_has expected_taint_bits "$letter"; then
         sev="INFO"
         summary="taint bit $letter ($meaning) newly set — allowlisted in expected_taint_bits"
-      elif [ "$letter" = "K" ]; then
-        sev="WARN"
-        summary="taint bit K (kernel live-patched) newly set — confirm this is an operator-applied livepatch"
       else
-        summary="kernel taint bit $letter ($meaning) newly set"
+        if [ "$letter" = "K" ]; then
+          summary="kernel taint bit K (live-patched) newly set and NOT in expected_taint_bits — unexpected kernel live-patch"
+        else
+          summary="kernel taint bit $letter ($meaning) newly set"
+        fi
         if [ "$sev" = "CRIT" ]; then fatal=true; fi
       fi
       emit_finding "$CHECK_NAME" kernel_taint "$sev" "$summary" "$base" "$cur" "$fatal"
     fi
   done
 
-  for bit in $(seq 0 31); do
-    mask=$(( 1 << bit ))
-    if [ "$(( cleared & mask ))" -ne 0 ]; then
-      info=$(taint_bit_info "$bit")
-      letter=${info%%|*}
-      [ -n "$letter" ] || letter="bit$bit"
-      emit_finding "$CHECK_NAME" kernel_taint INFO \
-        "kernel taint bit $letter cleared since baseline (unusual — taint bits are sticky until reboot)" \
-        "$base" "$cur" false
-    fi
-  done
+  # R7-2: report all cleared bits as ONE INFO — clears are reboot-normal churn,
+  # not per-bit anomalies.
+  if [ "$cleared" -ne 0 ]; then
+    local cleared_letters=""
+    for bit in $(seq 0 31); do
+      mask=$(( 1 << bit ))
+      if [ "$(( cleared & mask ))" -ne 0 ]; then
+        info=$(taint_bit_info "$bit")
+        letter=${info%%|*}
+        [ -n "$letter" ] || letter="bit$bit"
+        cleared_letters="$cleared_letters $letter"
+      fi
+    done
+    emit_finding "$CHECK_NAME" kernel_taint INFO \
+      "kernel taint value decreased ($base -> $cur); cleared bit(s):${cleared_letters} — normal after a reboot, re-baseline to clear" \
+      "$base" "$cur" false
+  fi
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

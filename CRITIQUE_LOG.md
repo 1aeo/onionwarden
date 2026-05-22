@@ -92,4 +92,17 @@ And virt-churn tolerance keyed only on the `allow_virt_churn` config flag, not
 the `is_hypervisor` profile bit that PLAN §0.2 says should imply it. Fixes:
 a physical NIC promiscuous on a virt-churn-tolerant host is WARN not fatal; the
 cross-check is CRIT+fatal only for physical interfaces; tolerance is now
-`allow_virt_churn OR is_hypervisor`. Four new tests; 123 pass.
+`allow_virt_churn OR is_hypervisor`. Four new tests; 122 pass.
+
+## Round 7 — Kernel-taint bit interpretation
+Checked the bit→severity mapping, the carve-outs, and unknown-bit handling.
+The severity table matched PLAN §2.1 and the fatal set matched §3.7 #4, and
+unknown bits were handled gracefully — but the livepatch carve-out was
+inverted: a newly-set `K` (kernel live-patched) bit was *unconditionally*
+downgraded to WARN, so an attacker live-patching the running kernel — a real
+rootkit technique — would raise only a digest-level WARN. Fixed so K is CRIT +
+fatal unless the operator opts out via `expected_taint_bits`, symmetric with
+the OEM `O` carve-out. Two lower-grade issues: post-reboot bit clears emitted
+one INFO per bit forever (now one consolidated INFO with reboot-aware wording),
+and bits 8 (`A`) and 17 (`T`) — real kernel taint bits — were missing from the
+decoder table (now added). Two updated tests; 123 pass.

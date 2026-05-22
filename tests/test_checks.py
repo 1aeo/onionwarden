@@ -22,9 +22,15 @@ def test_taint_allowlist_demotes():
     assert f[0]["severity"] == "INFO" and f[0]["fatal_candidate"] is False
 
 
-def test_taint_livepatch_K_not_fatal():
+def test_taint_livepatch_K_unexpected_is_crit_fatal():  # R7-1
     f = run_analyze("taint", ["tainted 0"], ["tainted 32768"], GENERIC)
-    assert f[0]["severity"] == "WARN" and f[0]["fatal_candidate"] is False
+    assert f[0]["severity"] == "CRIT" and f[0]["fatal_candidate"] is True
+
+
+def test_taint_livepatch_K_allowlisted_is_info():  # R7-1
+    cfg = GENERIC + 'expected_taint_bits = ["K"]\n'
+    f = run_analyze("taint", ["tainted 0"], ["tainted 32768"], cfg)
+    assert f[0]["severity"] == "INFO" and f[0]["fatal_candidate"] is False
 
 
 def test_taint_unknown_bit_graceful():
