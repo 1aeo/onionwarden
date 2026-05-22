@@ -38,8 +38,10 @@ fatal_is_armed() {
   return 0
 }
 
-_fatal_armed_action() { awk -F= '$1=="action"{print $2}' "$(fatal_armed_file)" 2>/dev/null | head -n1; }
-_fatal_armed_scope()  { awk -F= '$1=="scope"{print $2}'  "$(fatal_armed_file)" 2>/dev/null | head -n1; }
+# The action is read from the signed host.conf (R3-3); only scope lives in the
+# armed-state file (it can merely broaden which signals trigger the already-
+# signed action, never change the action itself).
+_fatal_armed_scope() { awk -F= '$1=="scope"{print $2}' "$(fatal_armed_file)" 2>/dev/null | head -n1; }
 
 # The deterministic freeze ruleset (C5): the §2.2 nft check regenerates this
 # byte-for-byte to recognise a legitimate freeze. Drops NEW outbound, keeps
@@ -62,10 +64,15 @@ table inet onionwarden_freeze {
 NFT
 }
 
+# _fatal_in_cooldown SIGNAL -> 0 if a recent action for the SAME signal is in
+# its cooldown window. Cooldown is per-signal (R3-2): it is flap protection for
+# a *recurring* finding, so a different fatal signal is never suppressed by it.
 _fatal_in_cooldown() {
-  local cf hours last now
+  local cf hours last now sig
   cf=$(fatal_cooldown_file)
   [ -f "$cf" ] || return 1
+  sig=$(awk -F= '$1=="signal"{print $2}' "$cf" 2>/dev/null | head -n1)
+  [ "$sig" = "$1" ] || return 1
   hours=$(cfg_get fatal_cooldown_hours 24)
   last=$(awk -F= '$1=="epoch"{print $2}' "$cf" 2>/dev/null | head -n1)
   [ -n "$last" ] || return 1
@@ -127,9 +134,12 @@ fatal_evaluate() {
     return 0
   fi
 
+  # R3-3: the ACTION comes from the SIGNED host.conf, never from the
+  # attacker-writable state/fatal_armed file — so rewriting that file cannot
+  # escalate (e.g. freeze -> poweroff). The armed file only carries scope.
   local action scope
-  action=$(_fatal_armed_action); scope=$(_fatal_armed_scope)
-  [ -n "$action" ] || action=$(cfg_get fatal_action alert)
+  action=$(cfg_get fatal_action alert)
+  scope=$(_fatal_armed_scope)
 
   # `alert` is report-only — the findings already went out via the normal path.
   if [ "$action" = "alert" ]; then
@@ -137,18 +147,20 @@ fatal_evaluate() {
     return 0
   fi
 
-  if _fatal_in_cooldown; then
-    log_warn "fatal: cooldown active — action '$action' suppressed (still logged/pushed)"
-    events_append fatal_cooldown WARN "fatal signal during cooldown — action suppressed" || true
-    return 0
-  fi
-
-  # Take the first in-scope fatal finding and act once.
+  # Take the first in-scope, non-cooled-down fatal finding and act once.
   local line signal summary
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     signal=$(printf '%s' "$line" | sed -n 's/.*"signal":"\([a-z_]*\)".*/\1/p')
     summary=$(printf '%s' "$line" | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p')
+
+    # R3-2: per-signal cooldown (flap protection for a recurring finding).
+    if _fatal_in_cooldown "$signal"; then
+      log_warn "fatal: signal '$signal' in cooldown — action suppressed (still logged/pushed)"
+      events_append fatal_cooldown WARN \
+        "fatal signal '$signal' recurred during cooldown — action suppressed" || true
+      continue
+    fi
 
     # poweroff scope gate: highconf subset only unless armed --scope all.
     if [ "$action" = "poweroff" ] && [ "${scope:-highconf}" = "highconf" ]; then

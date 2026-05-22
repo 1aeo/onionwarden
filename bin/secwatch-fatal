@@ -34,7 +34,7 @@ LOG_FILE="$(onionwarden_log_dir)/runs.ndjson"
 
 cmd="${1:-status}"; shift 2>/dev/null || true
 action="" scope="highconf"
-att_offbox=0 att_oob=0 att_phase2=0
+att_offbox=0 att_oob=0 att_phase2=0 att_apt=0
 events_log=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -43,6 +43,7 @@ while [ "$#" -gt 0 ]; do
     --attest-offbox) att_offbox=1; shift ;;
     --attest-oob)    att_oob=1; shift ;;
     --attest-phase2) att_phase2=1; shift ;;
+    --attest-apt)    att_apt=1; shift ;;
     --events-log)    events_log=$2; shift 2 ;;
     *) echo "onionwarden-fatal: unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -51,45 +52,51 @@ done
 operator="${SUDO_USER:-${USER:-$(id -un 2>/dev/null || echo unknown)}}"
 
 # --- checklist item helpers ----------------------------------------------
-# Auto item 1: ≥7 quiet CRIT-free days since the last baseline re-sign.
+# Item 1 (auto, R3-1/M3): zero CRIT in the OFF-BOX events.log. The off-box log
+# is the authority — a compromised host controls its on-box runs.ndjson and
+# could forge "7 quiet days" there. Operator pulls a recent window and passes
+# it with --events-log.
 _chk_quiet_baseline() {
-  local manifest age now mtime crit
-  manifest="$(onionwarden_baseline_dir)/manifest.json"
-  [ -f "$manifest" ] || { echo "FAIL item1: no signed baseline present"; return 1; }
-  mtime=$(stat -f %m "$manifest" 2>/dev/null || stat -c %Y "$manifest" 2>/dev/null || echo 0)
-  now=$(now_epoch); age=$(( now - mtime ))
-  if [ "$age" -lt $(( 7 * 86400 )) ]; then
-    echo "FAIL item1: baseline only $(( age / 86400 ))d old (<7d quiet window)"; return 1
+  local crit
+  if [ -z "$events_log" ] || [ ! -f "$events_log" ]; then
+    echo "FAIL item1: --events-log (a fresh off-box events.log copy) is required (M3)"
+    return 1
   fi
-  crit=0
-  [ -f "$LOG_FILE" ] && crit=$(grep -c '"type":"finding".*"severity":"CRIT"' "$LOG_FILE" 2>/dev/null || echo 0)
+  crit=$(grep -c '"severity":"CRIT"' "$events_log" 2>/dev/null || echo 0)
   if [ "${crit:-0}" -gt 0 ]; then
-    echo "FAIL item1: $crit CRIT finding(s) in run log — not a quiet baseline"; return 1
+    echo "FAIL item1: $crit CRIT event(s) in the off-box events.log — not a quiet baseline"
+    return 1
   fi
-  echo "pass item1: baseline $(( age / 86400 ))d old, zero CRIT in run log"
+  echo "pass item1: off-box events.log shows zero CRIT events"
 }
 
-# Auto item 2: at least one apt cycle demoted WARN->INFO by correlation.
+# Item 2 (attested, R3-1): apt-correlation proven. NOTE: a fully-auto check
+# would need a richer event schema (the demoted finding is INFO and does not
+# itself reach events.log) — see CRITIQUE_R3.md. Operator attests via
+# --attest-apt after confirming one apt cycle was demoted WARN->INFO.
 _chk_apt_correlation() {
-  local src="${events_log:-$LOG_FILE}"
-  if [ -f "$src" ] && grep -q 'apt-correlated' "$src" 2>/dev/null; then
-    echo "pass item2: apt-correlation evidence found"
+  if [ "$att_apt" = 1 ]; then
+    echo "pass item2: apt-correlation attested by $operator"
   else
-    echo "FAIL item2: no apt-correlation evidence — run through one apt cycle first"
+    echo "FAIL item2: --attest-apt not given (confirm one apt cycle demoted WARN->INFO)"
     return 1
   fi
 }
 
-# Auto item 3: fatal dry-run shows zero would-trigger hits.
+# Item 3 (auto, R3-4): fatal dry-run shows zero would-trigger hits AND actually
+# completed — an empty/crashed dry-run must not read as "clean".
 _chk_dry_run_clean() {
-  local hits
-  hits=$("$_bin_dir/onionwarden-fatal" dry-run 2>/dev/null | grep -c 'WOULD-TRIGGER' || true)
-  if [ "${hits:-0}" -eq 0 ]; then
-    echo "pass item3: fatal dry-run clean (0 would-trigger)"
-  else
-    echo "FAIL item3: fatal dry-run shows $hits would-trigger hit(s) — baseline self-trips"
+  local out
+  out=$("$_bin_dir/onionwarden-fatal" dry-run 2>/dev/null || true)
+  if printf '%s' "$out" | grep -q 'WOULD-TRIGGER'; then
+    echo "FAIL item3: fatal dry-run shows would-trigger hits — baseline self-trips"
     return 1
   fi
+  if ! printf '%s' "$out" | grep -q 'dry-run: clean'; then
+    echo "FAIL item3: fatal dry-run did not complete (no result line) — cannot attest"
+    return 1
+  fi
+  echo "pass item3: fatal dry-run completed clean (0 would-trigger)"
 }
 
 _run_checklist() {
@@ -111,8 +118,15 @@ _run_checklist() {
 
 case "$cmd" in
   arm)
-    [ -n "$action" ] || action=$(cfg_get fatal_action alert)
-    case "$action" in alert|poweroff|freeze|custom) ;; *) die "invalid --action: $action" ;; esac
+    # R3-3: the action is governed by the SIGNED host.conf. --action, if given,
+    # must match it — the runtime evaluator reads fatal_action from host.conf,
+    # so arming cannot select an action the signed config does not authorise.
+    conf_action=$(cfg_get fatal_action alert)
+    if [ -n "$action" ] && [ "$action" != "$conf_action" ]; then
+      die "arm: --action '$action' does not match the signed host.conf fatal_action '$conf_action' — change host.conf and re-sign off-box"
+    fi
+    action="$conf_action"
+    case "$action" in alert|poweroff|freeze|custom) ;; *) die "invalid fatal_action: $action" ;; esac
     if [ "$action" = "alert" ]; then
       echo "fatal: action 'alert' is report-only and always active — nothing to arm." >&2
       exit 0

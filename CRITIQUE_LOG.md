@@ -32,3 +32,19 @@ windows into a corrupt tree (now `flock`-guarded); and `events_flush_buffer`
 emptied the local buffer with a send-then-truncate that could destroy an event
 appended concurrently by `onionwarden-fatal` (now renames the buffer aside first).
 All 115 tests pass.
+
+## Round 3 — Fatal-action arming logic
+Audited the first-arm checklist, cooldown, and disarmed default. The checklist
+auto-items read the *on-box* `runs.ndjson` and `stat`'d the on-box manifest — a
+direct violation of M3 ("never from on-box logs, which a compromised host
+controls"); a compromised host could forge "7 quiet days". The cooldown was not
+signal-scoped, so one cooldowned signal muted the kill-switch for *every*
+signal, and `state/fatal_cooldown` is an unsigned attacker-writable file. The
+fatal action was read from the unsigned `state/fatal_armed` file, letting an
+attacker on an operator-`freeze`-armed host escalate to `poweroff scope=all`.
+And a crashed dry-run (zero output) passed the "baseline does not self-trip"
+item. Fixes: `arm` requires an off-box `--events-log` and verifies item 1
+against it; the cooldown is per-signal and every suppression is loudly logged
+off-box; the action is read from the signed `host.conf` (the armed file carries
+only scope); item 3 requires the dry-run's positive `clean` result line. All
+115 tests pass.
