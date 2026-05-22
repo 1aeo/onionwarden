@@ -15,7 +15,8 @@ _ONIONWARDEN_PROFILE_SH=1
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-_PROF_FILE=""
+# Preserve an inherited value (dispatcher exports _PROF_FILE to check children).
+_PROF_FILE="${_PROF_FILE:-}"
 
 prof_load() { _PROF_FILE=$1; }
 

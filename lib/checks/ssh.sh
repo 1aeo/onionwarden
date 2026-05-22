@@ -32,15 +32,21 @@ ssh_collect() {
       fi
     done
   done < /etc/passwd
-  # Effective sshd config.
+  # Effective sshd config. `sshd -T` needs root and a valid config; tolerate
+  # its failure instead of aborting the whole collector.
   if command -v sshd >/dev/null 2>&1; then
-    local key val
-    sshd -T 2>/dev/null | while read -r key val; do
-      key=$(printf '%s' "$key" | tr 'A-Z' 'a-z')
-      case " $_SSH_TRACKED " in
-        *" $key "*) printf 'sshd %s %s\n' "$key" "$val" ;;
-      esac
-    done
+    local sshd_t key val
+    sshd_t=$(sshd -T 2>/dev/null) || sshd_t=""
+    if [ -n "$sshd_t" ]; then
+      printf '%s\n' "$sshd_t" | while read -r key val; do
+        key=$(printf '%s' "$key" | tr 'A-Z' 'a-z')
+        case " $_SSH_TRACKED " in
+          *" $key "*) printf 'sshd %s %s\n' "$key" "$val" ;;
+        esac
+      done
+    else
+      printf 'sshd na sshd-T-unavailable\n'
+    fi
   else
     printf 'sshd na no-sshd-binary\n'
   fi

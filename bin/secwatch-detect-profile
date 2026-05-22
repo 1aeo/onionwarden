@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# bin/onionwarden-detect-profile — host capability probe (PLAN §0.2).
+#
+# Emits key=value capability lines. Run at install and re-run every dispatch;
+# the result is captured into the signed baseline so a *change* is a signal.
+#
+# Usage: onionwarden-detect-profile [OUTFILE]   (writes to OUTFILE or stdout)
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/common.sh
+. "$_bin_dir/../lib/common.sh"
+# shellcheck source=lib/profile.sh
+. "$_bin_dir/../lib/profile.sh"
+
+out="${1:-}"
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")" 2>/dev/null || true
+  profile_detect > "$out"
+  log_info "profile written to $out"
+else
+  profile_detect
+fi

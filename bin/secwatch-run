@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# bin/onionwarden-run — timer-invoked dispatcher (PLAN §3.1, §3.2).
+#
+# Invoked by the onionwarden-{fast,slow,daily} systemd services. Verifies the
+# signed baseline + host.conf, detects the host profile, runs every check at
+# the requested cadence under a per-check timeout + memory cap, logs structured
+# findings, drives the dead-man heartbeat, and routes alerts off-box.
+#
+# Usage: onionwarden-run fast|slow|daily
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/config.sh
+. "$ONIONWARDEN_ROOT/lib/config.sh"
+# shellcheck source=lib/profile.sh
+. "$ONIONWARDEN_ROOT/lib/profile.sh"
+# shellcheck source=lib/verify.sh
+. "$ONIONWARDEN_ROOT/lib/verify.sh"
+# shellcheck source=lib/baseline.sh
+. "$ONIONWARDEN_ROOT/lib/baseline.sh"
+# shellcheck source=lib/alert.sh
+. "$ONIONWARDEN_ROOT/lib/alert.sh"
+# Optional layers — present from Phase 2 onward; the dispatcher works without.
+[ -f "$ONIONWARDEN_ROOT/lib/suppress.sh" ] && . "$ONIONWARDEN_ROOT/lib/suppress.sh"
+[ -f "$ONIONWARDEN_ROOT/lib/fatal.sh" ]    && . "$ONIONWARDEN_ROOT/lib/fatal.sh"
+
+CADENCE="${1:-fast}"
+case "$CADENCE" in
+  fast|slow|daily) ;;
+  *) die "usage: onionwarden-run fast|slow|daily" ;;
+esac
+
+CHECK_TIMEOUT="${ONIONWARDEN_CHECK_TIMEOUT:-45}"
+CHECK_MEM_KB="${ONIONWARDEN_CHECK_MEM_KB:-524288}"   # 512 MB virtual per check
+
+RUN_ID="${ONIONWARDEN_RUN_ID:-$(now_iso | tr -d ':-')-$$}"
+export ONIONWARDEN_RUN_ID="$RUN_ID"
+
+LOG_DIR=$(onionwarden_log_dir)
+STATE_DIR=$(onionwarden_state_dir)
+BASELINE_DIR=$(onionwarden_baseline_dir)
+HOST_CONF=$(onionwarden_host_conf)
+mkdir -p "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
+LOG_FILE="$LOG_DIR/runs.ndjson"
+
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-run.XXXXXX")
+FINDINGS="$RUN_DIR/findings.ndjson"; : > "$FINDINGS"
+cleanup() { cfg_cleanup; rm -rf "$RUN_DIR"; }
+trap cleanup EXIT
+
+# Serialize runs: if a previous tick is still running, skip this one quietly
+# (the timer model means we lose one interval, not the watchdog — PLAN §3.1).
+if command -v flock >/dev/null 2>&1; then
+  exec 8>"$STATE_DIR/run.lock"
+  if ! flock -n 8; then
+    log_warn "onionwarden-run: a run is already in progress — skipping $CADENCE tick"
+    exit 0
+  fi
+fi
+
+# --- config ---------------------------------------------------------------
+[ -f "$HOST_CONF" ] || die "onionwarden-run: host.conf missing: $HOST_CONF"
+cfg_load "$HOST_CONF" "$ONIONWARDEN_ROOT/roles"
+export _CFG_STORE
+ROLE="$_CFG_ROLE"
+HOST_ID=$(cfg_get host_id unknown)
+# ONIONWARDEN_PUBKEY overrides the configured path (test seam / relocated installs).
+PUBKEY="${ONIONWARDEN_PUBKEY:-$(cfg_get verify_pubkey_path "$ONIONWARDEN_ROOT/onionwarden.pub")}"
+
+RUN_MAX_SEV="OK"
+NA_COUNT=0; DISABLED_COUNT=0; CLEAN_COUNT=0; DEVIATION_COUNT=0; FINDING_COUNT=0
+
+# emit a synthetic dispatcher-level finding (bad signature, unsupported OS...).
+dispatch_synth() {
+  emit_finding "dispatcher" "$1" "$2" "$3" "$4" "$5" "${6:-false}" >> "$FINDINGS"
+}
+
+# --- profile --------------------------------------------------------------
+PROFILE_FILE="$RUN_DIR/profile.state"
+# Replay seam: ONIONWARDEN_PROFILE_FILE supplies a pre-captured profile (used by
+# the test suite to exercise the dispatcher with a Linux profile on any host).
+if [ -n "${ONIONWARDEN_PROFILE_FILE:-}" ] && [ -f "${ONIONWARDEN_PROFILE_FILE:-}" ]; then
+  cp "$ONIONWARDEN_PROFILE_FILE" "$PROFILE_FILE"
+elif ! "$_bin_dir/onionwarden-detect-profile" "$PROFILE_FILE" >/dev/null 2>&1; then
+  profile_detect > "$PROFILE_FILE" 2>/dev/null || : > "$PROFILE_FILE"
+fi
+prof_load "$PROFILE_FILE"
+export _PROF_FILE="$PROFILE_FILE"
+
+REFUSE_RUN="no"
+if [ "$(prof_get os_supported true)" = "false" ]; then
+  dispatch_synth unsupported_os CRIT \
+    "onionwarden refuses to run on unsupported OS '$(prof_get os_id)'" "ubuntu/debian" "$(prof_get os_id)" true
+  REFUSE_RUN="yes"
+fi
+
+# --- suppression window (#10/#11) -----------------------------------------
+ONIONWARDEN_SUPPRESS_PHYSICAL="inactive"
+if command -v suppress_physical_active >/dev/null 2>&1 && suppress_physical_active; then
+  ONIONWARDEN_SUPPRESS_PHYSICAL="active"
+fi
+export ONIONWARDEN_SUPPRESS_PHYSICAL
+
+# --- trust state (signed baseline + host.conf) ----------------------------
+TRUST="trusted"
+if [ ! -f "$BASELINE_DIR/manifest.json" ]; then
+  TRUST="nobaseline"
+elif ! baseline_verify "$BASELINE_DIR" "$PUBKEY" 2>/dev/null; then
+  TRUST="badbaseline"
+fi
+HOSTCONF_SIGNED="no"
+if [ -f "$HOST_CONF.sig" ] && onionwarden_verify_artifact "$PUBKEY" "$HOST_CONF" 2>/dev/null; then
+  HOSTCONF_SIGNED="yes"
+fi
+
+BOOTSTRAPPING="no"
+[ -f "$STATE_DIR/bootstrapping" ] && BOOTSTRAPPING="yes"
+
+ANALYZE="yes"
+if [ "$TRUST" != "trusted" ] || [ "$HOSTCONF_SIGNED" != "yes" ]; then
+  if [ "$BOOTSTRAPPING" = "yes" ]; then
+    # M2: suppress signature-CRIT until the first signed round-trip.
+    dispatch_synth bootstrapping INFO \
+      "bootstrapping: no verified baseline/host.conf yet — collecting only, signature-CRIT suppressed" \
+      "signed" "$TRUST/$HOSTCONF_SIGNED"
+    ANALYZE="no"
+  else
+    dispatch_synth baseline_signature CRIT \
+      "baseline or host.conf failed Ed25519 verification — state untrusted" \
+      "verified" "baseline=$TRUST hostconf_signed=$HOSTCONF_SIGNED" true
+    ANALYZE="no"
+  fi
+elif [ "$BOOTSTRAPPING" = "yes" ]; then
+  # First fully-verified run ends the bootstrapping state (M2).
+  rm -f "$STATE_DIR/bootstrapping"
+  events_append bootstrapping_complete INFO \
+    "host '$HOST_ID' bootstrapping complete — first signed baseline + host.conf verified" || true
+fi
+
+# --- run checks -----------------------------------------------------------
+run_sandboxed() {
+  ( ulimit -v "$CHECK_MEM_KB" 2>/dev/null || true
+    if command -v timeout >/dev/null 2>&1; then
+      exec timeout "$CHECK_TIMEOUT" "$@"
+    else
+      exec "$@"
+    fi )
+}
+
+CHECKS_RAN=0
+for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
+  [ "$REFUSE_RUN" = "yes" ] && break
+  [ -f "$cf" ] || continue
+  name=$(basename "$cf" .sh)
+  cad=$(bash "$cf" cadence 2>/dev/null || printf 'unknown')
+  [ "$cad" = "boot" ] && cad="slow"
+  [ "$cad" = "$CADENCE" ] || continue
+
+  if cfg_list_has disable_checks "$name"; then
+    DISABLED_COUNT=$(( DISABLED_COUNT + 1 ))
+    printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"disabled"}\n' \
+      "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+    continue
+  fi
+  CHECKS_RAN=$(( CHECKS_RAN + 1 ))
+
+  cur="$RUN_DIR/$name.current"
+  # Replay seam: ONIONWARDEN_FAKE_STATE_DIR supplies pre-captured current state,
+  # used by the test suite to drive the full dispatcher path deterministically
+  # (and usable for offline replay of a captured host).
+  if [ -n "${ONIONWARDEN_FAKE_STATE_DIR:-}" ] && [ -f "$ONIONWARDEN_FAKE_STATE_DIR/$name.current" ]; then
+    cp "$ONIONWARDEN_FAKE_STATE_DIR/$name.current" "$cur"
+  elif [ "$name" = "profile" ]; then
+    cp "$PROFILE_FILE" "$cur"
+  elif ! run_sandboxed bash "$cf" collect > "$cur" 2>/dev/null; then
+    dispatch_synth "check_${name}" WARN "check '$name' collect failed or timed out" "ran" "failed"
+    printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"collect_failed"}\n' \
+      "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+    continue
+  fi
+
+  if [ "$ANALYZE" != "yes" ]; then
+    printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"collected_only"}\n' \
+      "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+    continue
+  fi
+
+  base=$(baseline_state_file "$BASELINE_DIR" "$name")
+  [ -n "$base" ] || base="/dev/null"
+  run_sandboxed bash "$cf" analyze --baseline "$base" --current "$cur" \
+    >> "$FINDINGS" 2>/dev/null || \
+    dispatch_synth "check_${name}" WARN "check '$name' analyze failed or timed out" "ran" "failed"
+done
+
+# --- process findings -----------------------------------------------------
+sev_of() { printf '%s' "$1" | sed -n 's/.*"severity":"\([A-Z]*\)".*/\1/p'; }
+
+while IFS= read -r core; do
+  [ -n "$core" ] || continue
+  sev=$(sev_of "$core")
+  case "$sev" in
+    NA) NA_COUNT=$(( NA_COUNT + 1 )) ;;
+    INFO|WARN|CRIT)
+      FINDING_COUNT=$(( FINDING_COUNT + 1 ))
+      DEVIATION_COUNT=$(( DEVIATION_COUNT + 1 ))
+      RUN_MAX_SEV=$(sev_max "$RUN_MAX_SEV" "$sev") ;;
+  esac
+  printf '{"type":"finding","ts":"%s","run_id":"%s","host_id":"%s",%s\n' \
+    "$(now_iso)" "$RUN_ID" "$HOST_ID" "${core#\{}" >> "$LOG_FILE"
+done < "$FINDINGS"
+CLEAN_COUNT=$(( CHECKS_RAN - DEVIATION_COUNT ))
+[ "$CLEAN_COUNT" -lt 0 ] && CLEAN_COUNT=0
+
+printf '{"type":"run_summary","ts":"%s","run_id":"%s","host_id":"%s","cadence":"%s","severity":"%s","checks_ran":%s,"findings":%s,"na":%s,"disabled":%s,"trust":"%s"}\n' \
+  "$(now_iso)" "$RUN_ID" "$HOST_ID" "$CADENCE" "$RUN_MAX_SEV" \
+  "$CHECKS_RAN" "$FINDING_COUNT" "$NA_COUNT" "$DISABLED_COUNT" "$TRUST" >> "$LOG_FILE"
+
+# --- fatal-action evaluation (Phase 2 — no-op if lib/fatal.sh absent) -----
+if command -v fatal_evaluate >/dev/null 2>&1; then
+  fatal_evaluate "$FINDINGS" "$RUN_MAX_SEV" || true
+fi
+
+# --- alerting -------------------------------------------------------------
+PUSH_LEVEL=$(cfg_get alert_push_level crit)
+case "$PUSH_LEVEL" in warn) PUSH_MIN="WARN" ;; *) PUSH_MIN="CRIT" ;; esac
+
+# 1. heartbeat / dead-man's switch
+if [ "$CADENCE" = "fast" ]; then
+  case "$RUN_MAX_SEV" in
+    WARN|CRIT) deadman_ping fail ;;
+    *)         deadman_ping ok ;;
+  esac
+fi
+
+# 2. events.log — every WARN/CRIT finding is appended for the forensic record
+if [ "$FINDING_COUNT" -gt 0 ]; then
+  while IFS= read -r core; do
+    [ -n "$core" ] || continue
+    sev=$(sev_of "$core")
+    case "$sev" in
+      WARN|CRIT)
+        summary=$(printf '%s' "$core" | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p')
+        events_append finding "$sev" "$summary" "$core" || true ;;
+    esac
+  done < "$FINDINGS"
+fi
+
+# 3. ntfy push — one summarised message per run when severity warrants
+if [ "$(sev_rank "$RUN_MAX_SEV")" -ge "$(sev_rank "$PUSH_MIN")" ]; then
+  body="run $RUN_ID on $HOST_ID ($ROLE): $RUN_MAX_SEV — $FINDING_COUNT finding(s)"$'\n'
+  body="$body$(grep -E '"severity":"(WARN|CRIT)"' "$FINDINGS" \
+    | sed -n 's/.*"severity":"\([A-Z]*\)".*"summary":"\([^"]*\)".*/  [\1] \2/p' | head -n 12)"
+  ntfy_push "$RUN_MAX_SEV" "onionwarden $RUN_MAX_SEV: $HOST_ID" "$body"
+fi
+
+# 4. email — CRIT only
+if [ "$RUN_MAX_SEV" = "CRIT" ]; then
+  onionwarden_email "onionwarden CRIT: $HOST_ID" \
+    "Host $HOST_ID run $RUN_ID reported CRIT findings. See events.log on the receiver."
+fi
+
+# 5. daily digest (per-host; the receiver rolls these up fleet-wide — §4)
+if [ "$CADENCE" = "daily" ]; then
+  digest=$(printf '{"version":"%s","selfhash_check":"see watchdog_meta","clean":%s,"na":%s,"disabled":%s,"findings":%s}' \
+    "$(onionwarden_version)" "$CLEAN_COUNT" "$NA_COUNT" "$DISABLED_COUNT" "$FINDING_COUNT")
+  events_append digest INFO "daily digest for $HOST_ID: severity $RUN_MAX_SEV" "$digest" || true
+fi
+
+# Replay any events buffered during a prior receiver outage.
+events_flush_buffer || true
+
+log_info "onionwarden-run $CADENCE complete: severity=$RUN_MAX_SEV findings=$FINDING_COUNT trust=$TRUST"
+exit 0

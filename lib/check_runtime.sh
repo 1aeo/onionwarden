@@ -68,7 +68,7 @@ check_run_cli() {
     esac
   done
   [ -n "$profile" ] && prof_load "$profile"
-  [ -n "$config" ]  && cfg_load "$config" "$roles" >/dev/null
+  [ -n "$config" ]  && cfg_load "$config" "$roles"
   case "$sub" in
     collect) "${CHECK_NAME}_collect" ;;
     analyze) "${CHECK_NAME}_analyze" "$baseline" "$current" ;;

@@ -12,7 +12,9 @@ _ONIONWARDEN_CONFIG_SH=1
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-_CFG_STORE=""
+# Preserve an inherited value: the dispatcher loads config once and exports
+# _CFG_STORE so check subprocesses reuse the parsed store without re-parsing.
+_CFG_STORE="${_CFG_STORE:-}"
 
 _cfg_trim() {
   local s=$1
@@ -45,14 +47,19 @@ _cfg_parse_file() {
           mv "${store}.tmp" "$store"
         fi
         printf '%s\t__ARRAY__\n' "$key" >> "$store"
-        IFS=',' read -r -a items <<< "$body"
-        for item in "${items[@]}"; do
-          item=$(_cfg_trim "$item")
-          item=${item#\"}; item=${item%\"}
-          item=${item#\'}; item=${item%\'}
-          [ -n "$item" ] || continue
-          printf '%s[]\t%s\n' "$key" "$item" >> "$store"
-        done
+        # Skip the split for an empty array [] — bash 3.2 errors on "${a[@]}"
+        # of an empty array under `set -u`.
+        if [ -n "$(_cfg_trim "$body")" ]; then
+          items=()
+          IFS=',' read -r -a items <<< "$body"
+          for item in "${items[@]}"; do
+            item=$(_cfg_trim "$item")
+            item=${item#\"}; item=${item%\"}
+            item=${item#\'}; item=${item%\'}
+            [ -n "$item" ] || continue
+            printf '%s[]\t%s\n' "$key" "$item" >> "$store"
+          done
+        fi
         ;;
       \"*)
         val=${val#\"}
@@ -71,6 +78,9 @@ _cfg_parse_file() {
 
 # cfg_load HOST_CONF [ROLES_DIR]
 # Loads role profile (named by host.conf's `role`) then host.conf on top.
+# Sets the globals _CFG_STORE and _CFG_ROLE. MUST NOT be called inside $(...)
+# — a command-substitution subshell would discard the _CFG_STORE assignment.
+_CFG_ROLE=""
 cfg_load() {
   local host_conf=$1 roles_dir=${2:-}
   [ -f "$host_conf" ] || die "config: host.conf not found: $host_conf"
@@ -84,12 +94,12 @@ cfg_load() {
   role=$(_cfg_trim "$role")
   role=${role#\"}; role=${role%%\"*}
   [ -n "$role" ] || role="generic"
+  _CFG_ROLE="$role"
 
   if [ -n "$roles_dir" ] && [ -f "$roles_dir/${role}.conf" ]; then
     _cfg_parse_file "$roles_dir/${role}.conf" "$_CFG_STORE"
   fi
   _cfg_parse_file "$host_conf" "$_CFG_STORE"
-  printf '%s' "$role"
 }
 
 cfg_cleanup() {

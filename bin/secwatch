@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# bin/onionwarden — operator CLI dispatcher (git-style subcommands, PLAN §3.3).
+#
+# Thin router to the onionwarden-* helpers so operators have one entrypoint:
+#   onionwarden run [fast|slow|daily]      run the watchdog now
+#   onionwarden baseline collect|diff ...  capture / compare a baseline
+#   onionwarden baseline-suggest           propose host.conf allowlist additions
+#   onionwarden detect-profile [OUT]       print the host capability profile
+#   onionwarden arm-fatal | disarm-fatal | fatal-status | fatal-test | fatal-dry-run
+#   onionwarden suppress ...               open a physical-access maintenance window
+#   onionwarden upgrade BUNDLE             apply a signed update bundle
+#   onionwarden fleet-diff ...             cross-fleet baseline diff (operator-side)
+#   onionwarden sign ...                   off-box Ed25519 signing
+#   onionwarden version | help
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+
+sub="${1:-help}"; shift 2>/dev/null || true
+
+case "$sub" in
+  run)             exec "$_bin_dir/onionwarden-run" "${@:-fast}" ;;
+  baseline)        exec "$_bin_dir/onionwarden-baseline" "$@" ;;
+  baseline-suggest) exec "$_bin_dir/onionwarden-baseline-suggest" "$@" ;;
+  detect-profile)  exec "$_bin_dir/onionwarden-detect-profile" "$@" ;;
+  arm-fatal)       exec "$_bin_dir/onionwarden-fatal" arm "$@" ;;
+  disarm-fatal)    exec "$_bin_dir/onionwarden-fatal" disarm "$@" ;;
+  fatal-status)    exec "$_bin_dir/onionwarden-fatal" status "$@" ;;
+  fatal-test)      exec "$_bin_dir/onionwarden-fatal" test "$@" ;;
+  fatal-dry-run)   exec "$_bin_dir/onionwarden-fatal" dry-run "$@" ;;
+  suppress)        exec "$_bin_dir/onionwarden-suppress" "$@" ;;
+  upgrade)         exec "$_bin_dir/onionwarden-upgrade" "$@" ;;
+  fleet-diff)      exec "$_bin_dir/onionwarden-fleet-diff" "$@" ;;
+  sign)            exec "$_bin_dir/onionwarden-sign" "$@" ;;
+  version)
+    if [ -f "$_bin_dir/../VERSION" ]; then cat "$_bin_dir/../VERSION"; else echo unknown; fi ;;
+  help|-h|--help)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)
+    printf 'onionwarden: unknown subcommand: %s\n\n' "$sub" >&2
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 1 ;;
+esac

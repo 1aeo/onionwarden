@@ -110,8 +110,12 @@ _pick_sha256_tool() {
 
 sha256_file() {
   _pick_sha256_tool
-  if [ ! -f "$1" ]; then printf '%s' "MISSING"; return 0; fi
-  $_sha256_tool "$1" 2>/dev/null | awk '{print $1}'
+  if [ ! -e "$1" ]; then printf 'MISSING'; return 0; fi
+  if [ ! -r "$1" ]; then printf 'UNREADABLE'; return 0; fi
+  local h
+  h=$($_sha256_tool "$1" 2>/dev/null | awk '{print $1}') || h=""
+  [ -n "$h" ] || h="UNREADABLE"
+  printf '%s' "$h"
 }
 
 sha256_string() {
@@ -131,3 +135,12 @@ onionwarden_root() {
   d=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
   printf '%s' "$d"
 }
+
+# Filesystem layout (PLAN §3.3). Every path is env-overridable so the whole
+# tool runs against a scratch tree under test without touching the real system.
+onionwarden_conf_dir()     { printf '%s' "${ONIONWARDEN_CONF_DIR:-/etc/onionwarden}"; }
+onionwarden_var_dir()      { printf '%s' "${ONIONWARDEN_VAR_DIR:-/var/lib/onionwarden}"; }
+onionwarden_log_dir()      { printf '%s' "${ONIONWARDEN_LOG_DIR:-/var/log/onionwarden}"; }
+onionwarden_state_dir()    { printf '%s' "${ONIONWARDEN_STATE_DIR:-$(onionwarden_var_dir)/state}"; }
+onionwarden_baseline_dir() { printf '%s' "${ONIONWARDEN_BASELINE_DIR:-$(onionwarden_var_dir)/baseline}"; }
+onionwarden_host_conf()    { printf '%s' "${ONIONWARDEN_HOST_CONF:-$(onionwarden_conf_dir)/host.conf}"; }
