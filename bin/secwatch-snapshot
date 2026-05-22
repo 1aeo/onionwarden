@@ -101,19 +101,25 @@ done
     _strip "$c"
   done
   printf 'set +e\n'
+  printf 'set -m\n'   # job control: each `( ) &` becomes its own process group
   printf '__PERCHECK=%s\n' "$PERCHECK_TIMEOUT"
   # Per-collector timeout: one slow collector (e.g. network_deep on a relay
   # with thousands of connections) must not starve the rest. Each collector
-  # runs backgrounded with a sleep-kill watchdog.
+  # runs backgrounded with a sleep-kill watchdog. With `set -m` the collector
+  # is a process-group leader, so the watchdog kills the WHOLE group — an
+  # orphaned `find` child cannot survive and hold the SSH channel open.
   cat <<'__SNAPFN__'
 __snap() {
   printf '###ONIONWARDEN-SNAPSHOT:%s###\n' "$1"
   ( "${1}_collect" 2>/dev/null ) &
   __p=$!
-  ( sleep "$__PERCHECK"; kill -TERM "$__p" 2>/dev/null; sleep 3; kill -KILL "$__p" 2>/dev/null ) 2>/dev/null &
+  ( sleep "$__PERCHECK"
+    kill -TERM -- -"$__p" 2>/dev/null || kill -TERM "$__p" 2>/dev/null
+    sleep 3
+    kill -KILL -- -"$__p" 2>/dev/null || kill -KILL "$__p" 2>/dev/null ) 2>/dev/null &
   __w=$!
   wait "$__p" 2>/dev/null
-  kill "$__w" 2>/dev/null; wait "$__w" 2>/dev/null
+  kill -- -"$__w" 2>/dev/null; kill "$__w" 2>/dev/null; wait "$__w" 2>/dev/null
   printf '###ONIONWARDEN-SNAPSHOT-END:%s###\n' "$1"
 }
 __SNAPFN__
