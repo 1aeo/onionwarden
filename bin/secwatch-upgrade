@@ -38,6 +38,14 @@ done
 [ -n "$sig" ] || sig="$bundle.sig"
 [ -f "$sig" ] || die "missing signature: $sig"
 
+# R2-2: serialise upgrades — two concurrent upgrades would interleave the
+# chattr -i / apply / chattr +i windows and corrupt the protected tree.
+mkdir -p "$(onionwarden_state_dir)" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$(onionwarden_state_dir)/upgrade.lock"
+  flock -n 9 || die "onionwarden-upgrade: another upgrade is already in progress"
+fi
+
 PUBKEY="${ONIONWARDEN_PUBKEY:-$(cfg_get verify_pubkey_path "$ONIONWARDEN_ROOT/onionwarden.pub")}"
 operator="${SUDO_USER:-${USER:-unknown}}"
 old_version=$(onionwarden_version)

@@ -105,10 +105,18 @@ fi
 export ONIONWARDEN_SUPPRESS_PHYSICAL
 
 # --- trust state (signed baseline + host.conf) ----------------------------
+# R2-1: copy the baseline into the run's private tmpdir, then verify and use
+# the COPY — so the bytes that were hash-verified are exactly the bytes the
+# checks read. Verifying the on-disk baseline and reading it later is a TOCTOU
+# (the baseline dir is intentionally not immutable).
 TRUST="trusted"
-if [ ! -f "$BASELINE_DIR/manifest.json" ]; then
+BASELINE_USE="$BASELINE_DIR"
+if [ -d "$BASELINE_DIR" ]; then
+  cp -R "$BASELINE_DIR" "$RUN_DIR/baseline" 2>/dev/null && BASELINE_USE="$RUN_DIR/baseline"
+fi
+if [ ! -f "$BASELINE_USE/manifest.json" ]; then
   TRUST="nobaseline"
-elif ! baseline_verify "$BASELINE_DIR" "$PUBKEY" 2>/dev/null; then
+elif ! baseline_verify "$BASELINE_USE" "$PUBKEY" 2>/dev/null; then
   TRUST="badbaseline"
 fi
 HOSTCONF_SIGNED="no"
@@ -214,7 +222,7 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     continue
   fi
 
-  base=$(baseline_state_file "$BASELINE_DIR" "$name")
+  base=$(baseline_state_file "$BASELINE_USE" "$name")
   [ -n "$base" ] || base="/dev/null"
   run_sandboxed bash "$cf" analyze --baseline "$base" --current "$cur" \
     >> "$FINDINGS" 2>/dev/null || \

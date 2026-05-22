@@ -139,22 +139,33 @@ events_append() {
 }
 
 # events_flush_buffer — replay locally-buffered events after an outage.
+# R2-3: the buffer is RENAMED out of the way before sending, so a concurrent
+# events_append (e.g. from onionwarden-fatal) writes to a fresh pending.ndjson and
+# is never truncated away unsent.
 events_flush_buffer() {
-  local buf target key sshhost line
+  local buf flushing target key sshhost
   buf="$(onionwarden_state_dir)/event_buffer/pending.ndjson"
   [ -s "$buf" ] || return 0
+  flushing="$buf.flushing.$$"
+  mv "$buf" "$flushing" 2>/dev/null || return 0   # another flush already took it
   if _alert_sink; then
-    cat "$buf" >> "$ONIONWARDEN_ALERT_SINK/events.log"
-    : > "$buf"
+    cat "$flushing" >> "$ONIONWARDEN_ALERT_SINK/events.log"
+    rm -f "$flushing"
     return 0
   fi
   target=$(cfg_get offbox_log_target "")
   key=$(cfg_get offbox_ssh_key "$(onionwarden_conf_dir)/keys/offbox_ed25519")
-  [ -n "$target" ] || return 0
+  if [ -z "$target" ]; then
+    cat "$flushing" >> "$buf"; rm -f "$flushing"; return 0
+  fi
   sshhost=${target%%:*}
-  if ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=15 "$sshhost" < "$buf" 2>/dev/null; then
-    : > "$buf"
+  if ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=15 "$sshhost" < "$flushing" 2>/dev/null; then
+    rm -f "$flushing"
     log_info "alert: flushed buffered events.log entries"
+  else
+    # still unreachable — re-buffer (receiver re-orders by sequence number)
+    cat "$flushing" >> "$buf"
+    rm -f "$flushing"
   fi
 }
 
