@@ -23,12 +23,13 @@ ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
 HOST_CONF=$(onionwarden_host_conf)
 [ -f "$HOST_CONF" ] && cfg_load "$HOST_CONF" "$ONIONWARDEN_ROOT/roles"
 
-bundle="" sig="" do_imm=1
+bundle="" sig="" do_imm=1 allow_downgrade=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bundle) bundle=$2; shift 2 ;;
     --sig)    sig=$2; shift 2 ;;
     --no-immutable) do_imm=0; shift ;;
+    --allow-downgrade) allow_downgrade=1; shift ;;
     -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "onionwarden-upgrade: unknown argument: $1" ;;
   esac
@@ -70,6 +71,18 @@ fi
 stage=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-upg.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 tar -xzf "$bundle" -C "$stage" || die "upgrade: bundle extraction failed"
+
+# R1-2: downgrade protection — refuse a bundle older than the installed code
+# (an attacker could otherwise replay an old signed bundle of known-buggy code).
+if [ -f "$stage/VERSION" ]; then
+  bundle_ver=$(tr -d ' \n\r\t' < "$stage/VERSION")
+  if [ "$allow_downgrade" != 1 ] && [ "$bundle_ver" != "$old_version" ]; then
+    newest=$(printf '%s\n%s\n' "$old_version" "$bundle_ver" | sort -V | tail -n1)
+    if [ "$newest" = "$old_version" ]; then
+      die "upgrade: bundle VERSION $bundle_ver is older than installed $old_version — refusing (pass --allow-downgrade to override)"
+    fi
+  fi
+fi
 # The bundle mirrors the install tree (bin/ lib/ roles/ systemd/ VERSION ...).
 for d in bin lib roles systemd VERSION onionwarden.pub; do
   [ -e "$stage/$d" ] || continue

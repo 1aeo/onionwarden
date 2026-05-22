@@ -140,6 +140,32 @@ elif [ "$BOOTSTRAPPING" = "yes" ]; then
     "host '$HOST_ID' bootstrapping complete — first signed baseline + host.conf verified" || true
 fi
 
+# R1-3: a degraded C2 pin (install.sh's substitution failed, or a dev/repo
+# copy) must not look healthy — surface it (INFO so it rides the digest rather
+# than tripping the dead-man every minute; the off-box anchor still covers it).
+if [ "$BOOTSTRAPPING" = "no" ] && [ "${ONIONWARDEN_PUBKEY_SHA256_PIN:-}" = "@PUBKEY_SHA256@" ]; then
+  dispatch_synth pubkey_pin INFO \
+    "verify.sh pubkey-hash pin is unset (@PUBKEY_SHA256@) — C2 on-box pubkey-swap guard inactive (install.sh pins it)" \
+    "pinned" "unpinned"
+fi
+
+# R1-1: host.conf anti-rollback via the optional signed config_epoch.
+if [ "$ANALYZE" = "yes" ]; then
+  CFG_EPOCH=$(cfg_get config_epoch 0)
+  LAST_EPOCH=$(cat "$STATE_DIR/config_epoch" 2>/dev/null || printf 0)
+  case "$CFG_EPOCH$LAST_EPOCH" in
+    *[!0-9]*) ;;  # non-numeric — skip the check
+    *)
+      if [ "$CFG_EPOCH" -lt "$LAST_EPOCH" ]; then
+        dispatch_synth config_rollback CRIT \
+          "host.conf config_epoch ($CFG_EPOCH) is lower than the last accepted ($LAST_EPOCH) — rollback" \
+          "$LAST_EPOCH" "$CFG_EPOCH" true
+      else
+        printf '%s' "$CFG_EPOCH" > "$STATE_DIR/config_epoch"
+      fi ;;
+  esac
+fi
+
 # --- run checks -----------------------------------------------------------
 run_sandboxed() {
   ( ulimit -v "$CHECK_MEM_KB" 2>/dev/null || true

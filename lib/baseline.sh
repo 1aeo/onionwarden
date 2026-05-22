@@ -59,8 +59,9 @@ baseline_state_file() {
   if [ -f "$f" ]; then printf '%s' "$f"; fi
 }
 
-# baseline_verify DIR PUBKEY — verify signature AND every state-file hash.
-# Returns 0 only if the whole baseline is intact and authentic.
+# baseline_verify DIR PUBKEY — verify signature, every state-file hash, that no
+# UNLISTED state file is present (R1-4), and that the baseline is not an
+# anti-rollback violation (R1-1). Returns 0 only if all hold.
 baseline_verify() {
   local dir=$1 pubkey=$2 manifest="$1/manifest.json"
   [ -f "$manifest" ] || { log_err "baseline: manifest missing in $dir"; return 1; }
@@ -68,7 +69,11 @@ baseline_verify() {
     log_err "baseline: manifest.json signature invalid"
     return 1
   fi
-  local check expected actual sf
+
+  local checks check expected actual sf
+  checks=$(manifest_state_checks "$manifest")
+
+  # Every state file named in the (signed) manifest must hash-match.
   while IFS= read -r check; do
     [ -n "$check" ] || continue
     expected=$(manifest_get "$manifest" "state.$check")
@@ -78,7 +83,35 @@ baseline_verify() {
       log_err "baseline: state file '$check' hash mismatch (manifest=$expected actual=$actual)"
       return 1
     fi
-  done <<< "$(manifest_state_checks "$manifest")"
+  done <<< "$checks"
+
+  # R1-4: a state file on disk but ABSENT from the signed manifest is untrusted
+  # input — refuse it rather than let its check diff against attacker state.
+  if [ -d "$dir/state" ]; then
+    for sf in "$dir"/state/*.state; do
+      [ -f "$sf" ] || continue
+      check=$(basename "$sf" .state)
+      if ! printf '%s\n' "$checks" | grep -qx "$check"; then
+        log_err "baseline: state file '$check.state' is present but not in the signed manifest — refusing"
+        return 1
+      fi
+    done
+  fi
+
+  # R1-1: anti-rollback. captured_at is inside the signed manifest; refuse a
+  # baseline older than the newest one this host has ever accepted.
+  local captured rollback last
+  captured=$(manifest_get "$manifest" captured_at)
+  rollback="$(onionwarden_state_dir)/baseline_captured_at"
+  last=$(cat "$rollback" 2>/dev/null || printf '')
+  if [ -n "$last" ] && [ -n "$captured" ] && [[ "$captured" < "$last" ]]; then
+    log_err "baseline: captured_at ($captured) older than last accepted ($last) — rollback refused (R1-1)"
+    return 1
+  fi
+  if [ -n "$captured" ]; then
+    mkdir -p "$(onionwarden_state_dir)" 2>/dev/null || true
+    printf '%s' "$captured" > "$rollback" 2>/dev/null || true
+  fi
   return 0
 }
 
