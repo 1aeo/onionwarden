@@ -19,22 +19,6 @@ _WATCH_UNITS="onionwarden-fast.timer onionwarden-fast.service \
 onionwarden-slow.timer onionwarden-slow.service \
 onionwarden-daily.timer onionwarden-daily.service"
 
-# onionwarden_self_hash ROOT — deterministic hash over installed code + config.
-onionwarden_self_hash() {
-  local root=$1 d
-  {
-    for d in "$root/bin" "$root/lib" "$root/roles" "$root/systemd"; do
-      [ -d "$d" ] || continue
-      find "$d" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-        printf '%s  %s\n' "$(sha256_file "$f")" "${f#"$root"/}"
-      done
-    done
-    for f in "$root/onionwarden.pub" "$root/VERSION" /etc/onionwarden/host.conf; do
-      [ -f "$f" ] && printf '%s  %s\n' "$(sha256_file "$f")" "$f"
-    done
-  } | sha256_string "$(cat)"
-}
-
 watchdog_meta_collect() {
   local root unit en act
   root=$(onionwarden_root)

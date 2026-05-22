@@ -138,6 +138,24 @@ onionwarden_root() {
 
 # Filesystem layout (PLAN §3.3). Every path is env-overridable so the whole
 # tool runs against a scratch tree under test without touching the real system.
+# onionwarden_self_hash ROOT — deterministic hash over installed code + config.
+# Used by the watchdog_meta check, the dispatcher's self-report, and
+# onionwarden-upgrade. The off-box receiver is the authoritative anchor (§3.5 H5).
+onionwarden_self_hash() {
+  local root=$1 d f
+  {
+    for d in "$root/bin" "$root/lib" "$root/roles" "$root/systemd"; do
+      [ -d "$d" ] || continue
+      find "$d" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+        printf '%s  %s\n' "$(sha256_file "$f")" "${f#"$root"/}"
+      done
+    done
+    for f in "$root/onionwarden.pub" "$root/VERSION" "$(onionwarden_conf_dir)/host.conf"; do
+      [ -f "$f" ] && printf '%s  %s\n' "$(sha256_file "$f")" "$f"
+    done
+  } | sha256_string "$(cat)"
+}
+
 onionwarden_conf_dir()     { printf '%s' "${ONIONWARDEN_CONF_DIR:-/etc/onionwarden}"; }
 onionwarden_var_dir()      { printf '%s' "${ONIONWARDEN_VAR_DIR:-/var/lib/onionwarden}"; }
 onionwarden_log_dir()      { printf '%s' "${ONIONWARDEN_LOG_DIR:-/var/log/onionwarden}"; }

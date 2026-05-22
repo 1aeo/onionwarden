@@ -248,6 +248,18 @@ if [ "$FINDING_COUNT" -gt 0 ]; then
   done < "$FINDINGS"
 fi
 
+# 2b. self-hash report — every fast run reports its self-hash + pubkey hash so
+#     the receiver can compare against its off-box known-good (§3.5 C2/H5).
+if [ -f "$RUN_DIR/watchdog_meta.current" ]; then
+  sr_self=$(awk '$1=="selfhash"{print $2}' "$RUN_DIR/watchdog_meta.current" | head -n1)
+  sr_pub=$(awk '$1=="pubkeyhash"{print $2}' "$RUN_DIR/watchdog_meta.current" | head -n1)
+  if [ -n "$sr_self" ]; then
+    events_append selfreport INFO "self-hash report" \
+      "$(printf '{"selfhash":"%s","pubkeyhash":"%s","version":"%s"}' \
+         "$sr_self" "${sr_pub:-none}" "$(onionwarden_version)")" || true
+  fi
+fi
+
 # 3. ntfy push — one summarised message per run when severity warrants
 if [ "$(sev_rank "$RUN_MAX_SEV")" -ge "$(sev_rank "$PUSH_MIN")" ]; then
   body="run $RUN_ID on $HOST_ID ($ROLE): $RUN_MAX_SEV — $FINDING_COUNT finding(s)"$'\n'

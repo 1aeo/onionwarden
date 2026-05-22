@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""onionwarden-receiver — off-box receiver-side verification & rollup (PLAN §4).
+
+Runs on the trusted, off-fleet receiver host. The receiver actively checks —
+it does not just store events. Subcommands:
+
+  verify-record [HOST...]   capture each host's current self-hash + pubkey hash
+                            as the off-box known-good (do this once, at the
+                            Phase-0 bootstrap, from a host you trust).
+  verify-check              compare every host's latest reported self-hash +
+                            pubkey hash against the known-good; CRIT on a
+                            mismatch (C2/H5 — the anchor the on-box check
+                            structurally cannot be). Exit 2 if any mismatch.
+  seqcheck                  per-host events.log sequence-gap detection (M7):
+                            a gap means an omitted event (a dropped CRIT).
+  digest                    ONE fleet-rollup line per host for the last 24h
+                            (H8 — one rollup, not nine all-clear pushes).
+
+Env: ONIONWARDEN_RECEIVER_ROOT (default ~/onionwarden), ONIONWARDEN_RECEIVER_NTFY
+(optional ntfy URL for verify-check CRIT pushes).
+"""
+import json
+import os
+import sys
+import time
+import urllib.request
+
+ROOT = os.environ.get("ONIONWARDEN_RECEIVER_ROOT",
+                       os.path.join(os.path.expanduser("~"), "onionwarden"))
+
+
+def host_dirs():
+    if not os.path.isdir(ROOT):
+        return []
+    out = []
+    for name in sorted(os.listdir(ROOT)):
+        d = os.path.join(ROOT, name)
+        if os.path.isdir(d) and not name.startswith(".") and not name.startswith("_"):
+            out.append((name, d))
+    return out
+
+
+def read_events(host_dir):
+    """Yield parsed event dicts from a host's events.log (skips junk lines)."""
+    path = os.path.join(host_dir, "events.log")
+    if not os.path.isfile(path):
+        return
+    with open(path, "r", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def latest_of_kind(host_dir, kind):
+    found = None
+    for ev in read_events(host_dir):
+        if ev.get("kind") == kind:
+            found = ev
+    return found
+
+
+def ntfy(title, body):
+    url = os.environ.get("ONIONWARDEN_RECEIVER_NTFY", "")
+    if not url:
+        return
+    try:
+        req = urllib.request.Request(
+            url, data=body.encode(),
+            headers={"Title": title, "Priority": "max", "Tags": "rotating_light"})
+        urllib.request.urlopen(req, timeout=15).read()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write("receiver: ntfy push failed: %s\n" % exc)
+
+
+def cmd_verify_record(hosts):
+    targets = hosts or [h for h, _ in host_dirs()]
+    for host in targets:
+        hd = os.path.join(ROOT, host)
+        ev = latest_of_kind(hd, "selfreport")
+        if not ev:
+            sys.stderr.write("verify-record: %s — no selfreport event yet\n" % host)
+            continue
+        detail = ev.get("detail", {})
+        kg = {"selfhash": detail.get("selfhash"),
+              "pubkeyhash": detail.get("pubkeyhash"),
+              "version": detail.get("version"),
+              "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        with open(os.path.join(hd, "known_good.json"), "w") as fh:
+            json.dump(kg, fh, indent=2)
+        print("recorded known-good for %s: selfhash=%s" % (host, kg["selfhash"]))
+    return 0
+
+
+def cmd_verify_check():
+    mismatches = 0
+    for host, hd in host_dirs():
+        kg_path = os.path.join(hd, "known_good.json")
+        if not os.path.isfile(kg_path):
+            print("WARN  %s — no known-good recorded (run verify-record)" % host)
+            continue
+        with open(kg_path) as fh:
+            kg = json.load(fh)
+        ev = latest_of_kind(hd, "selfreport")
+        if not ev:
+            print("WARN  %s — no selfreport event to compare" % host)
+            continue
+        detail = ev.get("detail", {})
+        for field in ("selfhash", "pubkeyhash"):
+            want, got = kg.get(field), detail.get(field)
+            if want and got and want != got:
+                mismatches += 1
+                msg = ("CRIT  %s — %s MISMATCH: known-good=%s reported=%s"
+                       % (host, field, want, got))
+                print(msg)
+                ntfy("onionwarden receiver CRIT: %s %s mismatch" % (host, field), msg)
+        if not mismatches:
+            print("ok    %s — selfhash + pubkeyhash match known-good" % host)
+    return 2 if mismatches else 0
+
+
+def cmd_seqcheck():
+    issues = 0
+    for host, hd in host_dirs():
+        seqs = [ev["seq"] for ev in read_events(hd)
+                if isinstance(ev.get("seq"), int)]
+        if not seqs:
+            print("ok    %s — no sequenced events yet" % host)
+            continue
+        lo, hi = min(seqs), max(seqs)
+        present = set(seqs)
+        gaps = [n for n in range(lo, hi + 1) if n not in present]
+        # A decreasing seq mid-stream means a reset (possible state wipe).
+        resets = sum(1 for a, b in zip(seqs, seqs[1:]) if b <= a)
+        if gaps:
+            issues += 1
+            print("CRIT  %s — events.log sequence gaps: %s missing in [%d..%d] (%s)"
+                  % (host, len(gaps), lo, hi, gaps[:20]))
+        if resets:
+            issues += 1
+            print("WARN  %s — %d sequence reset(s) — host state/ may have been wiped"
+                  % (host, resets))
+        if not gaps and not resets:
+            print("ok    %s — %d events, contiguous [%d..%d]" % (host, len(seqs), lo, hi))
+    return 2 if issues else 0
+
+
+def cmd_digest():
+    now = time.time()
+    cutoff = now - 24 * 3600
+    print("=== onionwarden fleet digest %s ==="
+          % time.strftime("%Y-%m-%d", time.gmtime(now)))
+    print("%-14s %5s %5s %5s  %-9s %s"
+          % ("host", "CRIT", "WARN", "INFO", "version", "note"))
+    for host, hd in host_dirs():
+        crit = warn = info = 0
+        version = "?"
+        note = ""
+        for ev in read_events(hd):
+            ts = ev.get("ts", "")
+            # crude 24h window by parsing the ISO timestamp
+            try:
+                t = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+                t -= time.timezone
+            except (ValueError, TypeError):
+                t = now
+            if t < cutoff:
+                continue
+            sev = ev.get("severity", "")
+            if sev == "CRIT":
+                crit += 1
+            elif sev == "WARN":
+                warn += 1
+            elif sev == "INFO":
+                info += 1
+            if ev.get("kind") == "digest":
+                d = ev.get("detail", {})
+                version = d.get("version", version)
+                if d.get("disabled", 0):
+                    note = "disabled-checks=%s" % d["disabled"]
+        flag = "  <-- CRIT" if crit else ""
+        print("%-14s %5d %5d %5d  %-9s %s%s"
+              % (host, crit, warn, info, version, note, flag))
+    return 0
+
+
+def main(argv):
+    if len(argv) < 2:
+        sys.stderr.write(__doc__)
+        return 2
+    cmd = argv[1]
+    if cmd == "verify-record":
+        return cmd_verify_record(argv[2:])
+    if cmd == "verify-check":
+        return cmd_verify_check()
+    if cmd == "seqcheck":
+        return cmd_seqcheck()
+    if cmd == "digest":
+        return cmd_digest()
+    sys.stderr.write("onionwarden-receiver: unknown command %r\n" % cmd)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
