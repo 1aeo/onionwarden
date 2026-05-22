@@ -52,7 +52,7 @@ accounts_analyze() {
     case "$line" in filehash*|sudoersd*) ;; *) continue ;; esac
     path=$(printf '%s' "$line" | awk '{print $2}')
     csha=$(printf '%s' "$line" | awk '{print $3}')
-    bsha=$(grep -E "^(filehash|sudoersd) $path " "$base_file" 2>/dev/null | awk '{print $3}' | head -n1)
+    bsha=$(grep -E "^(filehash|sudoersd) $path " "$base_file" 2>/dev/null | awk '{print $3}' | head -n1 || true)
     if [ -z "$bsha" ]; then
       emit_finding "$CHECK_NAME" sudoers CRIT \
         "new account/sudoers file appeared: $path" "absent" "$csha" true

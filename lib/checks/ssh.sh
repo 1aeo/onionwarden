@@ -73,8 +73,8 @@ ssh_analyze() {
     path=$(printf '%s' "$line" | awk '{print $3}')
     csha=$(printf '%s' "$line" | awk '{print $4}')
     ccnt=$(printf '%s' "$line" | awk '{print $5}')
-    bsha=$(grep -E "^authkeys $user $path " "$base_file" 2>/dev/null | awk '{print $4}' | head -n1)
-    bcnt=$(grep -E "^authkeys $user $path " "$base_file" 2>/dev/null | awk '{print $5}' | head -n1)
+    bsha=$(grep -E "^authkeys $user $path " "$base_file" 2>/dev/null | awk '{print $4}' | head -n1 || true)
+    bcnt=$(grep -E "^authkeys $user $path " "$base_file" 2>/dev/null | awk '{print $5}' | head -n1 || true)
     fatal=false
     if _ssh_user_privileged "$user"; then fatal=true; fi
     if [ -z "$bsha" ]; then
@@ -107,8 +107,8 @@ ssh_analyze() {
   # sshd -T effective config drift.
   local key bval cval sev
   for key in $_SSH_TRACKED; do
-    bval=$(grep -E "^sshd $key " "$base_file" 2>/dev/null | awk '{print $3}' | head -n1)
-    cval=$(grep -E "^sshd $key " "$cur_file" 2>/dev/null | awk '{print $3}' | head -n1)
+    bval=$(grep -E "^sshd $key " "$base_file" 2>/dev/null | awk '{print $3}' | head -n1 || true)
+    cval=$(grep -E "^sshd $key " "$cur_file" 2>/dev/null | awk '{print $3}' | head -n1 || true)
     [ -n "$bval$cval" ] || continue
     [ "$bval" = "$cval" ] && continue
     sev="WARN"
