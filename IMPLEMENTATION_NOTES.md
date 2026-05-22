@@ -105,6 +105,16 @@ This does not map to a specific PLAN TODO checkbox (Phase 0's offline-scan item
 is an operator step); it is dry-run tooling for building a host's first
 baseline + allowlist.
 
+**Relay-scale collectors.** `network_deep` and `process_ancestry` were
+refactored after the relay-a dry-run timed both out. Both now read `/proc`
+directly (`ONIONWARDEN_PROC`-overridable), are O(connections + pids) — per-PID
+`comm`/`cgroup` read once and cached, never per connection — and complete a
+5,000-connection / 500-process relay-scale fixture in ~1 s (`tests/test_perf.py`,
+perf-budgeted). The outbound `exclude-process` cgroup match now also covers
+systemd **template instances** (`tor.service` excludes `tor@0.service`,
+`tor@1.service`, …) — without this every connection on a multi-instance relay
+would flood the outbound check.
+
 ## Test & build environment
 
 - Built and tested on macOS with system `/bin/bash` **3.2** — a passing run

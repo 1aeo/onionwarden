@@ -4,8 +4,12 @@
 # A shell/interpreter parented to a service daemon that should never spawn one
 # (nginx, node, tor, vllm, ...) is a near-certain compromise — CRIT, emitted on
 # *presence* (no baseline diff: any occurrence is bad). Shells parented by
-# sshd/cron/systemd/login/getty are excluded (H4) — they legitimately spawn
-# shells. Executables in world-writable temp dirs are diffed vs baseline (WARN).
+# sshd/cron/systemd/login/getty are excluded (H4). Executables in world-writable
+# temp dirs are diffed vs baseline (WARN).
+#
+# Relay-scale: one walk of /proc, parents resolved from a pid->ppid/comm map
+# built in a single awk pass over /proc/<pid>/stat (one read per pid, never
+# re-stat parents per child). O(pids). ONIONWARDEN_PROC overrides /proc for tests.
 set -euo pipefail
 
 # shellcheck source=lib/check_runtime.sh
@@ -20,51 +24,40 @@ _PA_SHELLS="sh bash dash ash zsh ksh python python2 python3 perl ruby nc ncat"
 _PA_DAEMONS="nginx node tor vllm apache2 apache mysqld mariadbd postgres \
 postgresql redis-server memcached php-fpm haproxy"
 
-# _pa_in_list ITEM LIST -> 0 if ITEM is a whitespace word of LIST.
-_pa_in_list() {
-  local needle=$1 word
-  for word in $2; do
-    [ "$word" = "$needle" ] && return 0
-  done
-  return 1
-}
-
 process_ancestry_collect() {
-  if ! command -v ps >/dev/null 2>&1; then
-    printf 'na no-ps\n'
-    return 0
-  fi
-  # Build a pid->comm map line set so analyze stays pure. Try GNU ps first.
-  local pslines
-  pslines=$(ps -eo pid,ppid,comm 2>/dev/null) || pslines=""
-  if [ -z "$pslines" ]; then
-    # BSD ps fallback (macOS test host).
-    pslines=$(ps -axo pid,ppid,comm 2>/dev/null) || pslines=""
-  fi
-  if [ -n "$pslines" ]; then
-    # For each process whose comm is a shell, look up its parent's comm and
-    # emit only when the parent is a service daemon (not sshd/cron/systemd).
-    printf '%s\n' "$pslines" | awk -v shells=" $_PA_SHELLS " -v daemons=" $_PA_DAEMONS " '
-      NR>1 {
-        pid=$1; ppid=$2; comm=$3
-        # strip a leading path from comm
-        n=split(comm, c, "/"); comm=c[n]
-        pcomm[pid]=comm; parent[pid]=ppid
-        rows[NR]=pid
+  local proc="${ONIONWARDEN_PROC:-/proc}"
+
+  # svcshell: a single awk pass over every /proc/<pid>/stat builds the
+  # pid->comm and pid->ppid maps, then resolves each shell's parent from the
+  # map. No per-child re-stat of parents.
+  if [ -d "$proc" ] && ls "$proc"/[0-9]*/stat >/dev/null 2>&1; then
+    awk -v shells=" $_PA_SHELLS " -v daemons=" $_PA_DAEMONS " '
+      FNR==1 {
+        pidf = FILENAME
+        sub(/\/stat$/, "", pidf); sub(/.*\//, "", pidf)
+        # /proc/<pid>/stat: "PID (comm) STATE PPID ..."; comm may hold spaces
+        # and parens, so take the parenthesised span and split what follows.
+        if (match($0, /\(.*\)/)) {
+          c = substr($0, RSTART+1, RLENGTH-2)
+          split(substr($0, RSTART+RLENGTH+1), a, " ")
+          pp = a[2]
+        } else { c = "?"; pp = 0 }
+        comm[pidf] = c; ppid[pidf] = pp; pids[pidf] = 1
       }
       END {
-        for (i in rows) {
-          p=rows[i]; ch=pcomm[p]
-          # is the child an interpreter/shell?
-          base=ch; sub(/[0-9.]+$/,"",base)
-          if (index(shells, " " ch " ")==0 && index(shells, " " base " ")==0) continue
-          par=pcomm[parent[p]]
-          if (par=="") continue
-          pbase=par; sub(/[0-9.]+$/,"",pbase)
-          if (index(daemons, " " par " ")>0 || index(daemons, " " pbase " ")>0)
+        for (p in pids) {
+          ch = comm[p]; base = ch; sub(/[0-9.]+$/, "", base)
+          if (index(shells, " " ch " ") == 0 && index(shells, " " base " ") == 0) continue
+          par = comm[ppid[p]]
+          if (par == "") continue
+          pbase = par; sub(/[0-9.]+$/, "", pbase)
+          if (index(daemons, " " par " ") > 0 || index(daemons, " " pbase " ") > 0)
             print "svcshell", par, ch
         }
-      }' | sort -u
+      }
+    ' "$proc"/[0-9]*/stat 2>/dev/null | sort -u
+  else
+    printf 'na no-proc\n'
   fi
 
   # Executables in world-writable temp dirs.
@@ -73,7 +66,7 @@ process_ancestry_collect() {
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       printf 'tmpexec %s\n' "$path"
-    done <<< "$(find /tmp /var/tmp /dev/shm -xdev -type f -perm -111 2>/dev/null | sort -u)"
+    done <<< "$(find /tmp /var/tmp /dev/shm -xdev -type f -perm -111 2>/dev/null | sort -u || true)"
   fi
 }
 
@@ -97,7 +90,6 @@ process_ancestry_analyze() {
 
   # tmpexec: diff vs baseline (a temp dir may legitimately hold some execs).
   if [ ! -s "$base_file" ]; then
-    # Without a baseline, do not flag tmpexec, but svcshell above still fires.
     return 0
   fi
   local path
