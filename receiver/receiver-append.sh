@@ -34,8 +34,10 @@ while IFS= read -r line; do
   if [ "${#line}" -gt "$MAX_LINE" ]; then
     line="${line:0:$MAX_LINE}"
   fi
-  # Extract + sanitise host_id.
-  host=$(printf '%s' "$line" | sed -n 's/.*"host_id":"\([A-Za-z0-9_-]\{1,64\}\)".*/\1/p')
+  # Extract + sanitise host_id. Whitespace-tolerant: accepts compact JSON (what
+  # the watchdog emits) and pretty-printed JSON alike.
+  host=$(printf '%s' "$line" \
+    | sed -n 's/.*"host_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]\{1,64\}\)".*/\1/p')
   [ -n "$host" ] || host="_unknown"
   case "$host" in *[!A-Za-z0-9_-]*) host="_invalid" ;; esac
 
