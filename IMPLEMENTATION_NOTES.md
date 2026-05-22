@@ -94,4 +94,21 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
 - macOS `openssl` is LibreSSL 3.3.6, which lacks Ed25519 — so the test suite
   uses the pure-Python verifier backend (`ONIONWARDEN_VERIFY_BACKEND=python`).
   Production on Ubuntu 24.04 / Debian 13 uses `openssl pkeyutl` (OpenSSL 3.x).
-- Run the suite: `cd secure-server && python3 -m pytest tests/ -q` (115 tests).
+- Run the suite: `cd secure-server && python3 -m pytest tests/ -q` (129 tests
+  after the 10 critique rounds).
+
+## Post-critique residuals (see CRITIQUE_R*.md / CRITIQUE_LOG.md)
+
+Ten self-critique rounds folded 30+ fixes back in. Two items are documented
+*residuals* rather than fixed defects:
+
+- **R4-1** — the suppression window's expiry is evaluated against the host
+  clock; a root attacker who rolls the clock back can resurrect an expired
+  suppression token. Root can already disarm the kill-switch, so this adds
+  little; the honest fix is receiver-side (trusted clock) and is a Phase-3
+  enhancement. The on-box `clock` check's unsynced-clock WARN is the partial
+  detection.
+- **Display-connector hotplug** (§2.8 row 3, `/sys/class/drm/card*/status`) is
+  not implemented — the plan itself rates it "a complementary signal, not
+  load-bearing" (firmware flaps connector status). Input-device (#10) and
+  console-login (#11) — the load-bearing physical signals — are implemented.
