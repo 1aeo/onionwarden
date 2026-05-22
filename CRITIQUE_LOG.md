@@ -63,3 +63,18 @@ literal-string bug in the nonce fallback (`"$$RANDOM"`). The remaining residual
 — a root clock-rollback can resurrect an expired token — is documented; the
 honest fix is receiver-side (trusted clock) and the on-box `clock` check's
 unsynced-clock WARN is the partial detection. 116 tests pass.
+
+## Round 5 — Input-device + console-login detection
+Examined false positives and false negatives in the physical-access checks.
+The replug FP and serial-console FP were already handled (vid:pid identity,
+`^tty[0-9]+$` excludes `ttyS*`). Three real gaps: input_devices had no
+per-device allowlist, so a legitimate post-baseline device (uinput/KVM/synergy)
+forced the all-or-nothing `physical_access_allowed`; the sysfs snapshot is
+point-in-time, so a seconds-long BadUSB plug-attack-unplug vanishes before the
+next ~1-min tick; and console_login only read `who` (current sessions), missing
+a console login that closed within the interval — PLAN §2.8 explicitly asked
+for the `last`/wtmp half too. Fixes: added an `expected_input_devices`
+allowlist; input_devices now also diffs `journalctl -k` input-registration
+lines (durable for the boot, so a since-unplugged device is still caught);
+console_login now also parses `last` for closed `tty[0-9]` sessions. Three new
+tests; 119 pass.

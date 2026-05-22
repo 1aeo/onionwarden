@@ -49,8 +49,21 @@ input_devices_collect() {
       printf 'serio %s\n' "$(cat "$d/description" 2>/dev/null || printf 'unknown')"
     done
   fi
+  # R5-2: kernel-log input-device registrations. These persist for the whole
+  # boot, so they catch a plug-attack-unplug that the point-in-time sysfs
+  # snapshot above would miss. The device name is stable across reboots.
+  if command -v journalctl >/dev/null 2>&1; then
+    journalctl -k -q --no-pager 2>/dev/null \
+      | sed -n 's/.* input: \(.*\) as \/devices.*/\1/p' \
+      | sort -u | while IFS= read -r kn; do
+          [ -n "$kn" ] && printf 'kmsg_input %s\n' "$kn"
+        done
+  fi
   printf 'collected ok\n'
 }
+
+# _input_allowlisted TOKEN -> 0 if TOKEN is in expected_input_devices.
+_input_allowlisted() { cfg_list_has expected_input_devices "$1"; }
 
 # _input_severity -> echoes "SEV FATAL" honoring physical_access_mode.
 _input_severity() {
@@ -72,31 +85,38 @@ input_devices_analyze() {
     return 0
   fi
 
-  local sev fatal line cps desc
+  local sev fatal line cps desc token esev efatal
   read -r sev fatal <<< "$(_input_severity)"
 
-  # New USB HID keyboards/mice.
+  # _emit_input KIND-DESC LINE TOKEN — emit one finding, demoting to INFO if
+  # the device's identity token is allowlisted in expected_input_devices (R5-1).
+  _emit_input() {
+    esev="$sev"; efatal="$fatal"
+    if _input_allowlisted "$3"; then esev="INFO"; efatal="false"; fi
+    emit_finding "$CHECK_NAME" input_device "$esev" "$1" "absent" "$2" "$efatal"
+  }
+
+  # New USB HID keyboards/mice (allowlist token = vid:pid).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     cps=$(printf '%s' "$line" | awk '{print $2}')
+    token=$(printf '%s' "$line" | awk '{print $3}')
     case "$cps" in
       03/01/01) desc="USB HID keyboard" ;;
       03/01/02) desc="USB HID mouse" ;;
       *)        desc="USB HID device ($cps)" ;;
     esac
-    emit_finding "$CHECK_NAME" input_device "$sev" \
-      "new $desc attached since baseline: $(printf '%s' "$line" | sed 's/^usbhid //')" \
-      "absent" "$line" "$fatal"
+    _emit_input "new $desc attached since baseline: $(printf '%s' "$line" | sed 's/^usbhid //')" \
+      "$line" "$token"
   done <<< "$(comm -13 \
       <(grep '^usbhid ' "$base_file" 2>/dev/null | sort -u) \
       <(grep '^usbhid ' "$cur_file" 2>/dev/null | sort -u))"
 
-  # New /sys/class/input event devices.
+  # New /sys/class/input event devices (allowlist token = device name).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    emit_finding "$CHECK_NAME" input_device "$sev" \
-      "new input event device since baseline: $(printf '%s' "$line" | sed 's/^inputdev //')" \
-      "absent" "$line" "$fatal"
+    token=$(printf '%s' "$line" | sed 's/^inputdev //')
+    _emit_input "new input event device since baseline: $token" "$line" "$token"
   done <<< "$(comm -13 \
       <(grep '^inputdev ' "$base_file" 2>/dev/null | sort -u) \
       <(grep '^inputdev ' "$cur_file" 2>/dev/null | sort -u))"
@@ -104,12 +124,21 @@ input_devices_analyze() {
   # New PS/2 serio input devices.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    emit_finding "$CHECK_NAME" input_device "$sev" \
-      "new PS/2 (serio) input device since baseline: $(printf '%s' "$line" | sed 's/^serio //')" \
-      "absent" "$line" "$fatal"
+    token=$(printf '%s' "$line" | sed 's/^serio //')
+    _emit_input "new PS/2 (serio) input device since baseline: $token" "$line" "$token"
   done <<< "$(comm -13 \
       <(grep '^serio ' "$base_file" 2>/dev/null | sort -u) \
       <(grep '^serio ' "$cur_file" 2>/dev/null | sort -u))"
+
+  # New kernel-log input registrations (R5-2 — catches a plug-attack-unplug).
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    token=$(printf '%s' "$line" | sed 's/^kmsg_input //')
+    _emit_input "kernel logged a new input device since baseline (may already be unplugged): $token" \
+      "$line" "$token"
+  done <<< "$(comm -13 \
+      <(grep '^kmsg_input ' "$base_file" 2>/dev/null | sort -u) \
+      <(grep '^kmsg_input ' "$cur_file" 2>/dev/null | sort -u))"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

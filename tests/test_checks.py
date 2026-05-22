@@ -200,6 +200,19 @@ def test_input_devices_suppress_window_demotes_to_warn():
     assert f[0]["severity"] == "WARN" and f[0]["fatal_candidate"] is False
 
 
+def test_input_devices_allowlist_demotes():  # R5-1
+    cfg = GENERIC + 'expected_input_devices = ["dead:beef"]\n'
+    f = run_analyze("input_devices", ["collected ok"],
+                    ["usbhid 03/01/01 dead:beef Kbd", "collected ok"], cfg)
+    assert f[0]["severity"] == "INFO" and f[0]["fatal_candidate"] is False
+
+
+def test_input_devices_kmsg_hotplug_caught():  # R5-2
+    f = run_analyze("input_devices", ["collected ok"],
+                    ["kmsg_input EvilUSB Keyboard", "collected ok"], GENERIC)
+    assert f[0]["severity"] == "CRIT" and "kernel logged" in f[0]["summary"]
+
+
 # --- console_login --------------------------------------------------------
 def test_console_login_positive_fatal():
     f = run_analyze("console_login", ["collected ok"],
@@ -218,6 +231,12 @@ def test_console_login_suppress_demotes():
                     ["console tty1 root", "collected ok"], GENERIC,
                     env={"ONIONWARDEN_SUPPRESS_PHYSICAL": "active"})
     assert f[0]["severity"] == "WARN"
+
+
+def test_console_login_wtmp_closed_session_caught():  # R5-3
+    f = run_analyze("console_login", ["collected ok"],
+                    ["wtmp_login mallory tty2", "collected ok"], GENERIC)
+    assert f[0]["severity"] == "CRIT" and "wtmp" in f[0]["summary"]
 
 
 # --- profile --------------------------------------------------------------

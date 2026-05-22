@@ -19,8 +19,14 @@ console_login_collect() {
     return 0
   fi
   # `who` lines: user tty date time ... — keep only virtual-console ttys.
-  # tty[0-9]* matches tty1, tty2, ... and NOT ttyS0 (serial) or pts/N (remote).
+  # tty[0-9]+ matches tty1, tty2, ... and NOT ttyS0 (serial) or pts/N (remote).
   who 2>/dev/null | awk '$2 ~ /^tty[0-9]+$/ { print "console", $2, $1 }' | sort -u
+  # R5-3: wtmp (`last`) catches a console session that opened AND CLOSED within
+  # the interval — `who` only shows sessions open right now.
+  if command -v last >/dev/null 2>&1; then
+    last -w 2>/dev/null | awk '$2 ~ /^tty[0-9]+$/ { print "wtmp_login", $1, $2 }' \
+      | sort -u || true
+  fi
   printf 'collected ok\n'
 }
 
@@ -51,6 +57,7 @@ console_login_analyze() {
   local sev fatal line tty user
   read -r sev fatal <<< "$(_console_severity)"
 
+  # Active console sessions (`who`).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     tty=$(printf '%s' "$line" | awk '{print $2}')
@@ -61,6 +68,18 @@ console_login_analyze() {
   done <<< "$(comm -13 \
       <(grep '^console ' "$base_file" 2>/dev/null | sort -u) \
       <(grep '^console ' "$cur_file" 2>/dev/null | sort -u))"
+
+  # R5-3: closed console sessions recorded in wtmp (`last`).
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    user=$(printf '%s' "$line" | awk '{print $2}')
+    tty=$(printf '%s' "$line" | awk '{print $3}')
+    emit_finding "$CHECK_NAME" console_login "$sev" \
+      "new console login in wtmp on $tty by '$user' (session may have closed) since baseline" \
+      "absent" "$tty/$user" "$fatal"
+  done <<< "$(comm -13 \
+      <(grep '^wtmp_login ' "$base_file" 2>/dev/null | sort -u) \
+      <(grep '^wtmp_login ' "$cur_file" 2>/dev/null | sort -u))"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then
