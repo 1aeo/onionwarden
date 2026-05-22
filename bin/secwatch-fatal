@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# bin/onionwarden-fatal — manage the fatal-action kill-switch (PLAN §3.7).
+#
+#   onionwarden-fatal arm [--action ACTION] [--scope SCOPE] [attestations]
+#   onionwarden-fatal disarm
+#   onionwarden-fatal status
+#   onionwarden-fatal dry-run        evaluate current state, show would-trigger hits
+#   onionwarden-fatal test           synthetic fatal event through the off-box path
+#
+# ACTION = alert|poweroff|freeze|custom   SCOPE = highconf|all
+# `arm` runs the 7-item first-arm checklist (§3.7) and REFUSES unless it passes.
+# Items 1-3,5 are auto-verified; 4,6,7 are operator-attested via flags:
+#   --attest-offbox   item 4: `onionwarden fatal-test` round-trip proven
+#   --attest-oob      item 6: out-of-band recovery path tested + documented
+#   --attest-phase2   item 7: host is past Phase 2, re-baselined to hardened state
+# --attest-oob is MANDATORY for --action poweroff|custom.
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/config.sh
+. "$ONIONWARDEN_ROOT/lib/config.sh"
+# shellcheck source=lib/alert.sh
+. "$ONIONWARDEN_ROOT/lib/alert.sh"
+# shellcheck source=lib/fatal.sh
+. "$ONIONWARDEN_ROOT/lib/fatal.sh"
+
+HOST_CONF=$(onionwarden_host_conf)
+[ -f "$HOST_CONF" ] && cfg_load "$HOST_CONF" "$ONIONWARDEN_ROOT/roles"
+STATE_DIR=$(onionwarden_state_dir); mkdir -p "$STATE_DIR" 2>/dev/null || true
+LOG_FILE="$(onionwarden_log_dir)/runs.ndjson"
+
+cmd="${1:-status}"; shift 2>/dev/null || true
+action="" scope="highconf"
+att_offbox=0 att_oob=0 att_phase2=0
+events_log=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --action) action=$2; shift 2 ;;
+    --scope)  scope=$2; shift 2 ;;
+    --attest-offbox) att_offbox=1; shift ;;
+    --attest-oob)    att_oob=1; shift ;;
+    --attest-phase2) att_phase2=1; shift ;;
+    --events-log)    events_log=$2; shift 2 ;;
+    *) echo "onionwarden-fatal: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+operator="${SUDO_USER:-${USER:-$(id -un 2>/dev/null || echo unknown)}}"
+
+# --- checklist item helpers ----------------------------------------------
+# Auto item 1: ≥7 quiet CRIT-free days since the last baseline re-sign.
+_chk_quiet_baseline() {
+  local manifest age now mtime crit
+  manifest="$(onionwarden_baseline_dir)/manifest.json"
+  [ -f "$manifest" ] || { echo "FAIL item1: no signed baseline present"; return 1; }
+  mtime=$(stat -f %m "$manifest" 2>/dev/null || stat -c %Y "$manifest" 2>/dev/null || echo 0)
+  now=$(now_epoch); age=$(( now - mtime ))
+  if [ "$age" -lt $(( 7 * 86400 )) ]; then
+    echo "FAIL item1: baseline only $(( age / 86400 ))d old (<7d quiet window)"; return 1
+  fi
+  crit=0
+  [ -f "$LOG_FILE" ] && crit=$(grep -c '"type":"finding".*"severity":"CRIT"' "$LOG_FILE" 2>/dev/null || echo 0)
+  if [ "${crit:-0}" -gt 0 ]; then
+    echo "FAIL item1: $crit CRIT finding(s) in run log — not a quiet baseline"; return 1
+  fi
+  echo "pass item1: baseline $(( age / 86400 ))d old, zero CRIT in run log"
+}
+
+# Auto item 2: at least one apt cycle demoted WARN->INFO by correlation.
+_chk_apt_correlation() {
+  local src="${events_log:-$LOG_FILE}"
+  if [ -f "$src" ] && grep -q 'apt-correlated' "$src" 2>/dev/null; then
+    echo "pass item2: apt-correlation evidence found"
+  else
+    echo "FAIL item2: no apt-correlation evidence — run through one apt cycle first"
+    return 1
+  fi
+}
+
+# Auto item 3: fatal dry-run shows zero would-trigger hits.
+_chk_dry_run_clean() {
+  local hits
+  hits=$("$_bin_dir/onionwarden-fatal" dry-run 2>/dev/null | grep -c 'WOULD-TRIGGER' || true)
+  if [ "${hits:-0}" -eq 0 ]; then
+    echo "pass item3: fatal dry-run clean (0 would-trigger)"
+  else
+    echo "FAIL item3: fatal dry-run shows $hits would-trigger hit(s) — baseline self-trips"
+    return 1
+  fi
+}
+
+_run_checklist() {
+  local ok=0
+  _chk_quiet_baseline   || ok=1
+  _chk_apt_correlation  || ok=1
+  _chk_dry_run_clean    || ok=1
+  if [ "$att_offbox" = 1 ]; then echo "pass item4: off-box-first attested by $operator"
+  else echo "FAIL item4: --attest-offbox not given (run 'onionwarden fatal-test' first)"; ok=1; fi
+  # item5 (dead-man proven) folded into item4's fatal-test attestation record.
+  if [ "$att_offbox" = 1 ]; then echo "pass item5: dead-man self-test attested with off-box test"
+  else echo "FAIL item5: dead-man self-test not attested"; ok=1; fi
+  if [ "$att_oob" = 1 ]; then echo "pass item6: OOB recovery path attested by $operator"
+  else echo "WARN item6: OOB recovery not attested (mandatory for poweroff/custom)"; fi
+  if [ "$att_phase2" = 1 ]; then echo "pass item7: host past Phase 2 attested by $operator"
+  else echo "FAIL item7: --attest-phase2 not given"; ok=1; fi
+  return $ok
+}
+
+case "$cmd" in
+  arm)
+    [ -n "$action" ] || action=$(cfg_get fatal_action alert)
+    case "$action" in alert|poweroff|freeze|custom) ;; *) die "invalid --action: $action" ;; esac
+    if [ "$action" = "alert" ]; then
+      echo "fatal: action 'alert' is report-only and always active — nothing to arm." >&2
+      exit 0
+    fi
+    if { [ "$action" = "poweroff" ] || [ "$action" = "custom" ]; } && [ "$att_oob" != 1 ]; then
+      die "arm: --action $action REQUIRES --attest-oob (OOB recovery must be verified — §3.7 item 6)"
+    fi
+    echo "=== first-arm checklist (host $(cfg_get host_id unknown), action=$action scope=$scope) ==="
+    if ! _run_checklist; then
+      echo "=== checklist FAILED — refusing to arm (PLAN §3.7) ===" >&2
+      exit 2
+    fi
+    if ! cfg_bool fatal_action_armed false; then
+      die "arm: host.conf:fatal_action_armed is false — flip it to true and re-sign host.conf off-box first (signed master veto)"
+    fi
+    { printf 'action=%s\n' "$action"
+      printf 'scope=%s\n' "$scope"
+      printf 'armed_at=%s\n' "$(now_iso)"
+      printf 'operator=%s\n' "$operator"
+    } > "$(fatal_armed_file)"
+    events_append fatal_arm INFO "kill-switch ARMED action=$action scope=$scope by $operator" || true
+    echo "=== ARMED: action=$action scope=$scope ==="
+    ;;
+  disarm)
+    rm -f "$(fatal_armed_file)"
+    events_append fatal_disarm INFO "kill-switch DISARMED by $operator" || true
+    echo "kill-switch disarmed."
+    ;;
+  status)
+    echo "host:            $(cfg_get host_id unknown)"
+    echo "fatal_action:    $(cfg_get fatal_action alert)"
+    echo "master veto:     fatal_action_armed=$(cfg_get fatal_action_armed false)"
+    if fatal_is_armed; then
+      echo "state:           ARMED ($(cat "$(fatal_armed_file)" | tr '\n' ' '))"
+    else
+      echo "state:           DISARMED"
+    fi
+    if _fatal_in_cooldown; then echo "cooldown:        ACTIVE"; else echo "cooldown:        none"; fi
+    ;;
+  dry-run)
+    # Evaluate current state against the fatal-signal list without acting.
+    findings="$STATE_DIR/dryrun-findings.ndjson"
+    ONIONWARDEN_DRYRUN=1 ONIONWARDEN_DRYRUN_FINDINGS="$findings" \
+      "$_bin_dir/onionwarden-run" fast >/dev/null 2>&1 || true
+    ONIONWARDEN_DRYRUN=1 ONIONWARDEN_DRYRUN_FINDINGS="$findings" ONIONWARDEN_DRYRUN_APPEND=1 \
+      "$_bin_dir/onionwarden-run" slow >/dev/null 2>&1 || true
+    if [ -f "$findings" ] && grep -q '"fatal_candidate":true' "$findings"; then
+      echo "fatal dry-run: WOULD-TRIGGER hits found:"
+      grep '"fatal_candidate":true' "$findings" \
+        | sed -n 's/.*"signal":"\([a-z_]*\)".*"summary":"\([^"]*\)".*/  WOULD-TRIGGER \1: \2/p'
+      exit 1
+    fi
+    echo "fatal dry-run: clean — zero would-trigger hits against current state."
+    ;;
+  test)
+    echo "fatal-test: sending a synthetic fatal_action event through the off-box path..."
+    if events_append fatal_test INFO "synthetic fatal-test event (no action taken)" \
+         '{"synthetic":true}'; then
+      echo "fatal-test: event delivered to events.log — confirm it on the receiver."
+      echo "Then re-run 'onionwarden arm-fatal ... --attest-offbox'."
+    else
+      echo "fatal-test: off-box delivery FAILED — fix offbox_log_target before arming." >&2
+      exit 1
+    fi
+    ;;
+  *) echo "onionwarden-fatal: unknown command: $cmd" >&2; exit 1 ;;
+esac

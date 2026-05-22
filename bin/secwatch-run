@@ -218,6 +218,19 @@ printf '{"type":"run_summary","ts":"%s","run_id":"%s","host_id":"%s","cadence":"
   "$(now_iso)" "$RUN_ID" "$HOST_ID" "$CADENCE" "$RUN_MAX_SEV" \
   "$CHECKS_RAN" "$FINDING_COUNT" "$NA_COUNT" "$DISABLED_COUNT" "$TRUST" >> "$LOG_FILE"
 
+# --- dry-run mode: collect+analyze only, no side effects (onionwarden-fatal) --
+if [ "${ONIONWARDEN_DRYRUN:-0}" = "1" ]; then
+  if [ -n "${ONIONWARDEN_DRYRUN_FINDINGS:-}" ]; then
+    if [ "${ONIONWARDEN_DRYRUN_APPEND:-0}" = "1" ]; then
+      cat "$FINDINGS" >> "$ONIONWARDEN_DRYRUN_FINDINGS"
+    else
+      cp "$FINDINGS" "$ONIONWARDEN_DRYRUN_FINDINGS"
+    fi
+  fi
+  log_info "onionwarden-run $CADENCE dry-run complete — no heartbeat/alerts/fatal action"
+  exit 0
+fi
+
 # --- fatal-action evaluation (Phase 2 — no-op if lib/fatal.sh absent) -----
 if command -v fatal_evaluate >/dev/null 2>&1; then
   fatal_evaluate "$FINDINGS" "$RUN_MAX_SEV" || true
@@ -264,7 +277,7 @@ fi
 if [ "$(sev_rank "$RUN_MAX_SEV")" -ge "$(sev_rank "$PUSH_MIN")" ]; then
   body="run $RUN_ID on $HOST_ID ($ROLE): $RUN_MAX_SEV — $FINDING_COUNT finding(s)"$'\n'
   body="$body$(grep -E '"severity":"(WARN|CRIT)"' "$FINDINGS" \
-    | sed -n 's/.*"severity":"\([A-Z]*\)".*"summary":"\([^"]*\)".*/  [\1] \2/p' | head -n 12)"
+    | sed -n 's/.*"severity":"\([A-Z]*\)".*"summary":"\([^"]*\)".*/  [\1] \2/p' | head -n 12 || true)"
   ntfy_push "$RUN_MAX_SEV" "onionwarden $RUN_MAX_SEV: $HOST_ID" "$body"
 fi
 

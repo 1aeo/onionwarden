@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# bin/onionwarden-suppress — physical-access maintenance window (PLAN §3.7).
+#
+#   onionwarden-suppress request --reason "..." --duration 30m [--out FILE]
+#       Build an unsigned suppression token. Sign it OFF-BOX with the fleet key
+#       (onionwarden-sign), then `install` it. The window downgrades the
+#       physical-CONTACT fatal signals (#10 input-device, #11 console-login) to
+#       WARN — never #9 PROMISC, never the root-level signals #1-#8.
+#   onionwarden-suppress install --token FILE [--sig FILE]
+#       Verify the token's Ed25519 signature and activate the window.
+#   onionwarden-suppress status | clear
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/config.sh
+. "$ONIONWARDEN_ROOT/lib/config.sh"
+# shellcheck source=lib/verify.sh
+. "$ONIONWARDEN_ROOT/lib/verify.sh"
+# shellcheck source=lib/suppress.sh
+. "$ONIONWARDEN_ROOT/lib/suppress.sh"
+# shellcheck source=lib/alert.sh
+. "$ONIONWARDEN_ROOT/lib/alert.sh"
+
+HOST_CONF=$(onionwarden_host_conf)
+[ -f "$HOST_CONF" ] && cfg_load "$HOST_CONF" "$ONIONWARDEN_ROOT/roles"
+
+cmd="${1:-status}"; shift 2>/dev/null || true
+reason="" duration="" scope="physical" out="" token="" sig=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --reason)   reason=$2; shift 2 ;;
+    --duration) duration=$2; shift 2 ;;
+    --scope)    scope=$2; shift 2 ;;
+    --out)      out=$2; shift 2 ;;
+    --token)    token=$2; shift 2 ;;
+    --sig)      sig=$2; shift 2 ;;
+    *) echo "onionwarden-suppress: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+# _dur_seconds 30m|1h|90s -> seconds
+_dur_seconds() {
+  local d=$1 n unit
+  n=$(printf '%s' "$d" | sed 's/[a-zA-Z]*$//')
+  unit=$(printf '%s' "$d" | sed 's/^[0-9]*//')
+  case "$unit" in
+    s|"") printf '%s' "$n" ;;
+    m)    printf '%s' "$(( n * 60 ))" ;;
+    h)    printf '%s' "$(( n * 3600 ))" ;;
+    *) die "bad --duration '$d' (use 30m, 1h, 90s)" ;;
+  esac
+}
+
+case "$cmd" in
+  request)
+    [ -n "$reason" ] || die "request: --reason is required (audited off-box)"
+    [ -n "$duration" ] || die "request: --duration is required (e.g. 30m)"
+    secs=$(_dur_seconds "$duration")
+    [ "$secs" -gt 0 ] 2>/dev/null || die "request: bad duration"
+    [ "$secs" -le 28800 ] || die "request: duration capped at 8h"
+    host=$(cfg_get host_id unknown)
+    op="${SUDO_USER:-${USER:-unknown}}"
+    nonce=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || printf '%s' "$$RANDOM")
+    opened=$(now_iso)
+    exp=$(ONIONWARDEN_NOW="" date -u -d "+${secs} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || date -u -r "$(( $(now_epoch) + secs ))" +%Y-%m-%dT%H:%M:%SZ)
+    tok=$(printf '{"host_id":"%s","scope":"%s","reason":"%s","operator":"%s","opened_at":"%s","expires_at":"%s","nonce":"%s"}' \
+      "$(json_escape "$host")" "$(json_escape "$scope")" "$(json_escape "$reason")" \
+      "$(json_escape "$op")" "$opened" "$exp" "$nonce")
+    if [ -n "$out" ]; then printf '%s\n' "$tok" > "$out"; else printf '%s\n' "$tok"; fi
+    cat >&2 <<EOF
+suppression token built (UNSIGNED). Next:
+  1. onionwarden-sign sign --key <fleet-priv> --file ${out:-<saved token>}
+  2. onionwarden-suppress install --token ${out:-<token>} --sig ${out:-<token>}.sig
+EOF
+    ;;
+  install)
+    [ -n "$token" ] || die "install: --token FILE is required"
+    [ -n "$sig" ] || sig="$token.sig"
+    [ -f "$token" ] && [ -f "$sig" ] || die "install: token or signature file missing"
+    pub="${ONIONWARDEN_PUBKEY:-$(cfg_get verify_pubkey_path "$ONIONWARDEN_ROOT/onionwarden.pub")}"
+    onionwarden_verify_sig "$pub" "$token" "$sig" \
+      || die "install: token signature INVALID — refusing (PLAN §3.7 C5)"
+    dest=$(suppress_token_path)
+    mkdir -p "$(dirname "$dest")"
+    cp "$token" "$dest"; cp "$sig" "$dest.sig"
+    if suppress_physical_active; then
+      events_append suppress_open INFO "physical-access window opened: $(_supp_field "$dest" reason)" \
+        "$(printf '{"operator":"%s","expires_at":"%s"}' \
+           "$(_supp_field "$dest" operator)" "$(_supp_field "$dest" expires_at)")" || true
+      echo "suppression window ACTIVE until $(_supp_field "$dest" expires_at)"
+    else
+      die "install: token verified but window not active (expired, future-dated, or replayed)"
+    fi
+    ;;
+  status)
+    suppress_describe
+    ;;
+  clear)
+    dest=$(suppress_token_path)
+    rm -f "$dest" "$dest.sig"
+    events_append suppress_clear INFO "physical-access window cleared by ${SUDO_USER:-${USER:-unknown}}" || true
+    echo "suppression window cleared."
+    ;;
+  *) echo "onionwarden-suppress: unknown command: $cmd" >&2; exit 1 ;;
+esac
