@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# fatal-action.sh — operator custom kill-switch action (PLAN §3.7).
+#
+# Install this as /etc/onionwarden/fatal-action.sh (chmod 0744) ONLY if host.conf
+# sets `fatal_action = custom`. It is baseline-hashed and, with
+# immutable_scripts, chattr +i — so a tampered custom action is itself a
+# self-hash CRIT. `custom` arming is gated to Phase 4 (§3.7).
+#
+# onionwarden invokes it as:  fatal-action.sh <signal> <summary>
+# It runs AFTER the off-box-first protocol (the event is already on the
+# receiver) and AFTER the wall broadcast. Keep it short, idempotent, and
+# non-interactive. Exit 0 on success.
+set -euo pipefail
+
+signal="${1:-unknown}"
+summary="${2:-}"
+
+logger -t onionwarden-fatal "custom fatal action invoked: signal=$signal" 2>/dev/null || true
+
+# --- example containment actions (uncomment + adapt to your environment) ---
+#
+# Drop new outbound but keep this SSH session (a softer freeze):
+#   nft add table inet onionwarden_custom 2>/dev/null || true
+#
+# Stop the host's workload so tampered output is not trusted/acted on:
+#   systemctl stop tor.service        # tor-relay
+#   systemctl stop my-eval-pipeline   # eval-host
+#
+# Snapshot volatile forensic state to a local file for later off-box pull:
+#   ts=$(date -u +%Y%m%dT%H%M%SZ)
+#   { ps -ef; ss -tunap; lsmod; } > "/var/lib/onionwarden/state/forensic-$ts.txt" 2>&1 || true
+
+exit 0

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# bin/onionwarden-baseline-suggest — propose host.conf allowlist additions (PLAN §5).
+#
+# Inspects observed state and prints proposed expected_* additions for a human
+# to review and paste in. It NEVER edits host.conf, and a proposal that matches
+# a trust-expanding delta still requires the §5 step-4 offline scan before it
+# can be signed in.
+#
+# Usage: onionwarden-baseline-suggest [--baseline DIR]
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/config.sh
+. "$ONIONWARDEN_ROOT/lib/config.sh"
+
+baseline_dir=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --baseline) baseline_dir=$2; shift 2 ;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[ -n "$baseline_dir" ] || baseline_dir=$(onionwarden_baseline_dir)
+HOST_CONF=$(onionwarden_host_conf)
+[ -f "$HOST_CONF" ] && cfg_load "$HOST_CONF" "$ONIONWARDEN_ROOT/roles"
+
+echo "=== onionwarden-baseline-suggest — proposals (NOT applied; human approves) ==="
+
+# Listening ports observed bound non-loopback but not in expected_lan_ports.
+ports_state="$baseline_dir/state/ports.state"
+if [ -f "$ports_state" ]; then
+  miss=""
+  while IFS= read -r line; do
+    case "$line" in listener\ *) ;; *) continue ;; esac
+    addr=$(printf '%s' "$line" | awk '{print $3}')
+    port=$(printf '%s' "$line" | awk '{print $4}')
+    case "$addr" in 127.*|::1|"[::1]") continue ;; esac
+    cfg_list_has expected_lan_ports "$port" && continue
+    case " $miss " in *" $port "*) ;; *) miss="$miss $port" ;; esac
+  done < "$ports_state"
+  [ -n "$miss" ] && printf '  expected_lan_ports += [%s]\n' "$(printf '%s' "$miss" | sed 's/^ //;s/ /, /g')"
+fi
+
+# UID-0 accounts not in expected_uid0.
+acct_state="$baseline_dir/state/accounts.state"
+if [ -f "$acct_state" ]; then
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    cfg_list_has expected_uid0 "$u" && continue
+    printf '  expected_uid0 += ["%s"]   (TRUST-EXPANDING — needs offline scan, §5 C1)\n' "$u"
+  done <<< "$(awk '$1=="uid0"{print $2}' "$acct_state")"
+fi
+
+# Loaded modules not in expected_extra_modules (informational — most are stock).
+mod_state="$baseline_dir/state/modules.state"
+if [ -f "$mod_state" ]; then
+  cnt=$(awk '$1=="module"{c++} END{print c+0}' "$mod_state")
+  printf '  (%s modules loaded — review %s/state/modules.state; add only late-loading ones to expected_extra_modules)\n' \
+    "$cnt" "$baseline_dir"
+fi
+
+echo "=== end of proposals — review each, then edit host.conf by hand ==="

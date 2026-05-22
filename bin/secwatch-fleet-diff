@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# bin/onionwarden-fleet-diff — cross-fleet baseline diff report (PLAN §6 Phase 3).
+#
+# PLACEHOLDER — this is a Phase-3 deliverable and is out of scope for the
+# current Phase 0-2 build. It is shipped as a stub so the CLI surface and the
+# §3.3 layout are complete; the full implementation lands in Phase 3.
+#
+# When built, fleet-diff is an OPERATOR-SIDE tool (run from the receiver or an
+# admin box, not a per-host check): it pulls each host's signed baseline
+# manifest, normalises module/port/SUID/sshd/kernel posture, and emits a
+# Markdown diff grouped by host and role so per-role anomalies stand out.
+set -euo pipefail
+
+cat >&2 <<'EOF'
+onionwarden-fleet-diff: NOT YET IMPLEMENTED (Phase 3).
+
+This is an operator-side cross-fleet baseline diff, scheduled for Phase 3 of
+the rollout (PLAN §6). The current build covers Phases 0-2 only.
+
+Phase-3 scope:
+  - pull each host's signed baseline manifest from the receiver
+  - normalise loaded modules / listening ports / SUID set / sshd posture /
+    kernel + taint / installed-package set
+  - emit a Markdown report grouped by host and role, surfacing the deltas
+    WITHIN a role (one tor-relay carrying a module the other seven lack, etc.)
+
+Until then, compare two single hosts with:
+  onionwarden-baseline diff --baseline <dirA> --candidate <dirB>
+EOF
+exit 64

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# bin/onionwarden-upgrade — apply a signed update bundle (PLAN §3.6).
+#
+# The ONLY supported way to change the protected (chattr +i) set — code, unit
+# files, or host.conf. The operator never runs chattr by hand. Fed a signed
+# bundle it: (1) verifies the Ed25519 signature, (2) clears +i, (3) applies the
+# update, (4) re-applies +i, (5) writes an audit entry on-box AND off-box.
+#
+# Usage: onionwarden-upgrade --bundle BUNDLE.tar.gz [--sig FILE] [--no-immutable]
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/config.sh
+. "$ONIONWARDEN_ROOT/lib/config.sh"
+# shellcheck source=lib/verify.sh
+. "$ONIONWARDEN_ROOT/lib/verify.sh"
+# shellcheck source=lib/alert.sh
+. "$ONIONWARDEN_ROOT/lib/alert.sh"
+
+HOST_CONF=$(onionwarden_host_conf)
+[ -f "$HOST_CONF" ] && cfg_load "$HOST_CONF" "$ONIONWARDEN_ROOT/roles"
+
+bundle="" sig="" do_imm=1
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --bundle) bundle=$2; shift 2 ;;
+    --sig)    sig=$2; shift 2 ;;
+    --no-immutable) do_imm=0; shift ;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "onionwarden-upgrade: unknown argument: $1" ;;
+  esac
+done
+[ -n "$bundle" ] && [ -f "$bundle" ] || die "missing/invalid --bundle"
+[ -n "$sig" ] || sig="$bundle.sig"
+[ -f "$sig" ] || die "missing signature: $sig"
+
+PUBKEY="${ONIONWARDEN_PUBKEY:-$(cfg_get verify_pubkey_path "$ONIONWARDEN_ROOT/onionwarden.pub")}"
+operator="${SUDO_USER:-${USER:-unknown}}"
+old_version=$(onionwarden_version)
+old_self=$(onionwarden_self_hash "$ONIONWARDEN_ROOT")
+
+# 1. verify the bundle signature — abort on failure.
+onionwarden_verify_sig "$PUBKEY" "$bundle" "$sig" \
+  || die "onionwarden-upgrade: bundle signature INVALID — aborting (PLAN §3.6)"
+log_info "upgrade: bundle signature verified"
+
+# Protected paths (PLAN §3.6).
+protected_paths() {
+  local p
+  for p in "$ONIONWARDEN_ROOT"/bin/* "$ONIONWARDEN_ROOT"/lib/*.sh "$ONIONWARDEN_ROOT"/lib/*.py \
+           "$ONIONWARDEN_ROOT"/lib/checks/*.sh "$ONIONWARDEN_ROOT"/roles/*.conf \
+           "$ONIONWARDEN_ROOT/onionwarden.pub" "$ONIONWARDEN_ROOT/VERSION" "$HOST_CONF"; do
+    [ -e "$p" ] && printf '%s\n' "$p"
+  done
+  for p in /etc/systemd/system/onionwarden-*.timer /etc/systemd/system/onionwarden-*.service; do
+    [ -e "$p" ] && printf '%s\n' "$p"
+  done
+}
+
+# 2. clear +i.
+if [ "$do_imm" = 1 ] && command -v chattr >/dev/null 2>&1; then
+  protected_paths | while IFS= read -r p; do chattr -i "$p" 2>/dev/null || true; done
+  log_info "upgrade: cleared +i on protected set"
+fi
+
+# 3. apply the update.
+stage=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-upg.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+tar -xzf "$bundle" -C "$stage" || die "upgrade: bundle extraction failed"
+# The bundle mirrors the install tree (bin/ lib/ roles/ systemd/ VERSION ...).
+for d in bin lib roles systemd VERSION onionwarden.pub; do
+  [ -e "$stage/$d" ] || continue
+  cp -a "$stage/$d" "$ONIONWARDEN_ROOT/" 2>/dev/null || cp -af "$stage/$d" "$ONIONWARDEN_ROOT/$d"
+done
+[ -d "$stage/systemd" ] && cp -af "$stage"/systemd/* /etc/systemd/system/ 2>/dev/null || true
+log_info "upgrade: files applied"
+
+# 4. re-apply +i.
+if [ "$do_imm" = 1 ] && command -v chattr >/dev/null 2>&1; then
+  protected_paths | while IFS= read -r p; do chattr +i "$p" 2>/dev/null || true; done
+  log_info "upgrade: re-applied +i on protected set"
+fi
+command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+
+# 5. audit entry — on-box and off-box.
+new_version=$(onionwarden_version)
+new_self=$(onionwarden_self_hash "$ONIONWARDEN_ROOT")
+audit=$(printf '{"operator":"%s","old_version":"%s","new_version":"%s","old_selfhash":"%s","new_selfhash":"%s"}' \
+  "$operator" "$old_version" "$new_version" "$old_self" "$new_self")
+printf '%s upgrade %s\n' "$(now_iso)" "$audit" >> "$(onionwarden_log_dir)/upgrade.log"
+events_append upgrade INFO "onionwarden upgraded $old_version -> $new_version by $operator" "$audit" || true
+echo "onionwarden-upgrade: complete — $old_version -> $new_version"
+echo "A failed/partial upgrade is loud: the next run's self-hash check will CRIT."
