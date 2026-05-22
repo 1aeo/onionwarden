@@ -63,7 +63,10 @@ case "$cmd" in
     [ "$secs" -le 28800 ] || die "request: duration capped at 8h"
     host=$(cfg_get host_id unknown)
     op="${SUDO_USER:-${USER:-unknown}}"
-    nonce=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || printf '%s' "$$RANDOM")
+    nonce=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)
+    # R4-3: a real fallback if /dev/urandom is unavailable (not the literal
+    # string "RANDOM" the old `"$$RANDOM"` produced).
+    [ -n "$nonce" ] || nonce="fb-$$-${RANDOM}-${RANDOM}-$(now_epoch)"
     opened=$(now_iso)
     exp=$(ONIONWARDEN_NOW="" date -u -d "+${secs} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
           || date -u -r "$(( $(now_epoch) + secs ))" +%Y-%m-%dT%H:%M:%SZ)
@@ -102,8 +105,12 @@ EOF
   clear)
     dest=$(suppress_token_path)
     rm -f "$dest" "$dest.sig"
-    events_append suppress_clear INFO "physical-access window cleared by ${SUDO_USER:-${USER:-unknown}}" || true
-    echo "suppression window cleared."
+    # R4-2: genuinely revoke — stamp suppress_last to now so the cleared token
+    # (and any older one) fails the monotonic anti-replay guard if re-installed.
+    mkdir -p "$(onionwarden_state_dir)" 2>/dev/null || true
+    printf '%s' "$(now_iso)" > "$(onionwarden_state_dir)/suppress_last" 2>/dev/null || true
+    events_append suppress_clear INFO "physical-access window cleared + revoked by ${SUDO_USER:-${USER:-unknown}}" || true
+    echo "suppression window cleared and revoked."
     ;;
   *) echo "onionwarden-suppress: unknown command: $cmd" >&2; exit 1 ;;
 esac

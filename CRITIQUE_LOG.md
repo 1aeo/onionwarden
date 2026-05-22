@@ -48,3 +48,18 @@ against it; the cooldown is per-signal and every suppression is loudly logged
 off-box; the action is read from the signed `host.conf` (the armed file carries
 only scope); item 3 requires the dry-run's positive `clean` result line. All
 115 tests pass.
+
+## Round 4 — Suppression workflow
+Probed whether `onionwarden suppress` can silence real alerts and whether a stale
+token can be replayed. Scope held up — only `input_devices`/`console_login`
+consult `physical_access_mode`, so PROMISC and the root signals genuinely
+cannot be muted, and suppression downgrades to WARN rather than silencing. But
+`onionwarden-suppress clear` turned out to be cosmetic: it only `rm`d the local
+token file, so a captured copy could be re-installed and honored until its
+natural expiry — an operator who "closed" a window early had not. Fixed by
+stamping `suppress_last` to now on `clear`, so the monotonic anti-replay guard
+rejects the cleared token on re-install (covered by a new test). Also fixed a
+literal-string bug in the nonce fallback (`"$$RANDOM"`). The remaining residual
+— a root clock-rollback can resurrect an expired token — is documented; the
+honest fix is receiver-side (trusted clock) and the on-box `clock` check's
+unsynced-clock WARN is the partial detection. 116 tests pass.

@@ -153,6 +153,20 @@ def test_suppress_rejects_expired_token(kstree):
     assert r.returncode != 0  # expired -> not active
 
 
+def test_suppress_clear_revokes_token(kstree):
+    """R4-2: after `clear`, re-installing the same captured token is refused."""
+    _write_conf(kstree)
+    tok = kstree["dir"] / "tok"
+    _suppress(kstree, "request", "--reason", "visit", "--duration", "60m",
+              "--out", str(tok))
+    sign_file(kstree["priv"], str(tok))
+    assert _suppress(kstree, "install", "--token", str(tok)).returncode == 0
+    assert _suppress(kstree, "clear").returncode == 0
+    # the token file is still valid + unexpired, but clear revoked it
+    r = _suppress(kstree, "install", "--token", str(tok))
+    assert r.returncode != 0
+
+
 def test_suppress_rejects_replayed_old_token(kstree):
     _write_conf(kstree)
     # Install a current token, then try to install an OLDER one.
