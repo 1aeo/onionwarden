@@ -1,0 +1,11 @@
+[Unit]
+Description=onionwarden slow checks timer (~1 h)
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=1h
+Persistent=true
+AccuracySec=2min
+
+[Install]
+WantedBy=timers.target

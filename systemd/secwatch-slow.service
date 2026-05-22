@@ -1,0 +1,16 @@
+[Unit]
+Description=onionwarden slow + boot tamper checks (PLAN §3.2)
+Documentation=file:/opt/onionwarden/PLAN.md
+ConditionPathExists=/opt/onionwarden/bin/onionwarden-run
+
+[Service]
+Type=oneshot
+ExecStart=/opt/onionwarden/bin/onionwarden-run slow
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/onionwarden /var/log/onionwarden
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=800M
+TasksMax=256
+TimeoutStartSec=600

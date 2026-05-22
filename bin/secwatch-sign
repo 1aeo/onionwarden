@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# bin/onionwarden-sign — off-box Ed25519 signing tool (PLAN §5).
+#
+# Runs ONLY on the operator's trusted machine — never on a monitored host. The
+# private key never touches the fleet (custody is the operator's choice: an
+# offline machine or a hardware token — OPERATOR_DECISIONS §4).
+#
+#   onionwarden-sign keygen --priv KEY.pem --pub onionwarden.pub
+#   onionwarden-sign sign   --key KEY.pem  --file FILE [--out FILE.sig]
+#   onionwarden-sign verify --pub  PUB.pem --file FILE [--sig FILE.sig]
+#
+# Backend: openssl (OpenSSL 3.x) when it supports Ed25519, else the bundled
+# pure-Python implementation (lib/ed25519.py). Keys are PEM either way.
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+_ED="$_bin_dir/../lib/ed25519.py"
+
+_openssl_ed25519() {
+  command -v openssl >/dev/null 2>&1 || return 1
+  openssl genpkey -algorithm ED25519 -out /dev/null >/dev/null 2>&1
+}
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+cmd="${1:-}"; shift 2>/dev/null || true
+priv="" pub="" file="" sig="" out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --priv|--key) priv=$2; shift 2 ;;
+    --pub)        pub=$2;  shift 2 ;;
+    --file)       file=$2; shift 2 ;;
+    --sig)        sig=$2;  shift 2 ;;
+    --out)        out=$2;  shift 2 ;;
+    -h|--help)    usage 0 ;;
+    *) printf 'onionwarden-sign: unknown argument: %s\n' "$1" >&2; usage 1 ;;
+  esac
+done
+
+case "$cmd" in
+  keygen)
+    [ -n "$priv" ] && [ -n "$pub" ] || { echo "keygen needs --priv and --pub" >&2; exit 1; }
+    if _openssl_ed25519; then
+      ( umask 077; openssl genpkey -algorithm ED25519 -out "$priv" )
+      openssl pkey -in "$priv" -pubout -out "$pub"
+    else
+      python3 "$_ED" keygen "$priv" "$pub"
+    fi
+    chmod 600 "$priv"
+    printf 'keypair written: private=%s public=%s\n' "$priv" "$pub" >&2
+    ;;
+  sign)
+    [ -n "$priv" ] && [ -n "$file" ] || { echo "sign needs --key and --file" >&2; exit 1; }
+    [ -n "$out" ] || out="$file.sig"
+    if _openssl_ed25519; then
+      openssl pkeyutl -sign -inkey "$priv" -rawin -in "$file" -out "$out"
+    else
+      python3 "$_ED" sign "$priv" "$file" "$out"
+    fi
+    printf 'signature written: %s\n' "$out" >&2
+    ;;
+  verify)
+    [ -n "$pub" ] && [ -n "$file" ] || { echo "verify needs --pub and --file" >&2; exit 1; }
+    [ -n "$sig" ] || sig="$file.sig"
+    if _openssl_ed25519; then
+      if openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$file" -sigfile "$sig" >/dev/null 2>&1; then
+        echo "OK: signature valid"; exit 0
+      else
+        echo "FAIL: signature invalid" >&2; exit 1
+      fi
+    else
+      if python3 "$_ED" verify "$pub" "$file" "$sig"; then
+        echo "OK: signature valid"; exit 0
+      else
+        echo "FAIL: signature invalid" >&2; exit 1
+      fi
+    fi
+    ;;
+  ""|-h|--help) usage 0 ;;
+  *) printf 'onionwarden-sign: unknown command: %s\n' "$cmd" >&2; usage 1 ;;
+esac

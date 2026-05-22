@@ -1,0 +1,10 @@
+[Unit]
+Description=onionwarden daily checks timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

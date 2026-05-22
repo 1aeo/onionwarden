@@ -1,0 +1,46 @@
+# answers-canary.example — per-host answers file for `install.sh --answers`.
+#
+# This is the reviewable per-host input (M9): the operator edits and reviews
+# THIS file, install.sh turns it verbatim into /etc/onionwarden/host.conf, then it
+# is signed off-box. Endpoints with UUID-* / unguessable values must be filled
+# in before install. Example: the rollout canary `relay-a` (a tor-relay).
+
+# --- identity -------------------------------------------------------------
+host_id            = "relay-a"
+role               = "tor-relay"          # selects roles/tor-relay.conf
+canary             = true                 # Q1 — the onionwarden rollout canary
+
+# --- alerting (fill in real endpoints before install) --------------------
+ntfy_url           = "https://ntfy.sh/onionwarden-CHANGE-ME-unguessable-topic"
+ntfy_token         = ""                    # optional ntfy access token
+deadman_provider   = "healthchecks-saas"   # alerts on ABSENCE — see §4
+deadman_url        = "https://hc-ping.com/CHANGE-ME-UUID-PER-HOST"
+offbox_log_target  = "onionwarden@receiver.example.net:~/onionwarden/relay-a/events.log"
+offbox_ssh_key     = "/etc/onionwarden/keys/offbox_ed25519"
+email_to           = "alerts@example.net"
+alert_push_level   = "warn"                # canary: push everything to learn noise floor
+
+# --- allowlists (operator-curated; baseline records ACTUAL state) ---------
+expected_lan_ports     = [22, 9001, 9030]  # SSH + this relay's ORPort + DirPort
+expected_uid0          = ["root"]
+expected_admins        = ["operator"]
+expected_extra_modules = []
+expected_taint_bits    = []                # add "K" only for an applied livepatch
+allow_virt_churn       = false
+physical_access_allowed = false            # fleet default — keyboard/console = CRIT
+
+# --- workload integrity ---------------------------------------------------
+workload_integrity_check = "none"          # canary override (role default is hashes)
+
+# --- fatal-action kill-switch (ships disarmed — PLAN §3.7) ----------------
+fatal_action         = "alert"             # tor-relay: never `freeze` (H6)
+fatal_action_armed   = false               # arm only via `onionwarden arm-fatal`
+fatal_cooldown_hours = 24
+fatal_ack_timeout_s  = 10
+
+# --- baseline / signing / retention --------------------------------------
+verify_pubkey_path     = "/opt/onionwarden/onionwarden.pub"
+apt_correlation_window = "5m"
+offbox_log_retention   = "365d"
+immutable_scripts      = true
+disable_checks         = []

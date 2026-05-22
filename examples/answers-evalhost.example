@@ -1,0 +1,35 @@
+# answers-evalhost.example — per-host answers file for an eval-host (eval-host).
+# See answers-canary.example for the full annotation of every field.
+
+host_id            = "eval-host"
+role               = "eval-host"           # selects roles/eval-host.conf
+canary             = false
+
+ntfy_url           = "https://ntfy.sh/onionwarden-CHANGE-ME-unguessable-topic"
+deadman_provider   = "healthchecks-saas"
+deadman_url        = "https://hc-ping.com/CHANGE-ME-UUID-PER-HOST"
+offbox_log_target  = "onionwarden@receiver.example.net:~/onionwarden/eval-host/events.log"
+offbox_ssh_key     = "/etc/onionwarden/keys/offbox_ed25519"
+email_to           = "alerts@example.net"
+alert_push_level   = "crit"
+
+expected_lan_ports     = [22, 3000, 18789]  # SSH + node listeners (Appendix A)
+expected_uid0          = ["root"]
+expected_admins        = ["operator"]
+expected_extra_modules = []
+expected_taint_bits    = []
+allow_virt_churn       = true               # eval-host runs nested QEMU guests
+physical_access_allowed = false
+
+workload_integrity_check = "none"           # live nested-VM disks churn (§2.4)
+
+fatal_action         = "alert"
+fatal_action_armed   = false
+fatal_cooldown_hours = 24
+fatal_ack_timeout_s  = 10
+
+verify_pubkey_path     = "/opt/onionwarden/onionwarden.pub"
+apt_correlation_window = "5m"
+offbox_log_retention   = "365d"
+immutable_scripts      = true
+disable_checks         = []

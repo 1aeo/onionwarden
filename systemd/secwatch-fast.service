@@ -1,0 +1,18 @@
+[Unit]
+Description=onionwarden fast tamper checks (PLAN §3.2)
+Documentation=file:/opt/onionwarden/PLAN.md
+ConditionPathExists=/opt/onionwarden/bin/onionwarden-run
+
+[Service]
+Type=oneshot
+ExecStart=/opt/onionwarden/bin/onionwarden-run fast
+# Hardening (PLAN §3.5). Runs as root: the checks read /etc/shadow, kmsg, nft.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/onionwarden /var/log/onionwarden
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelLogs=false
+MemoryMax=600M
+TasksMax=256
+TimeoutStartSec=120

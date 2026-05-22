@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# bin/onionwarden-baseline — capture & diff baselines (PLAN §5).
+#
+#   onionwarden-baseline collect [--out DIR] [--after-apt]
+#       Run every check's collector + the profile probe, write per-check state
+#       files and an UNSIGNED manifest.json. Signing happens off-box afterwards
+#       (onionwarden-sign) — the host has no signing key.
+#
+#   onionwarden-baseline diff --baseline OLD --candidate NEW [--offline-scan-attested]
+#       Classify each delta as a contraction or a trust-expanding delta. C1:
+#       a candidate carrying trust-expanding deltas is NOT signable until an
+#       out-of-band scan has attested them (--offline-scan-attested).
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/baseline.sh
+. "$ONIONWARDEN_ROOT/lib/baseline.sh"
+
+# Record-type prefixes that EXPAND trust (PLAN §5 step 2). A newly-present line
+# of one of these kinds cannot be eyeballed safe — it needs an offline scan.
+_TRUST_EXPANDING="module listener uid0 admingrp emptypw authkeys suid capability newcron newunit"
+
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+cmd="${1:-}"; shift 2>/dev/null || true
+out="" baseline="" candidate="" attested="no" after_apt="no"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --out)        out=$2; shift 2 ;;
+    --baseline)   baseline=$2; shift 2 ;;
+    --candidate)  candidate=$2; shift 2 ;;
+    --offline-scan-attested) attested="yes"; shift ;;
+    --after-apt)  after_apt="yes"; shift ;;
+    -h|--help)    usage 0 ;;
+    *) printf 'onionwarden-baseline: unknown argument: %s\n' "$1" >&2; usage 1 ;;
+  esac
+done
+
+do_collect() {
+  local host_id reason cf name
+  host_id=$(grep -E '^[[:space:]]*host_id' "$(onionwarden_host_conf)" 2>/dev/null \
+    | head -n1 | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' || true)
+  [ -n "$host_id" ] || host_id="unknown"
+  [ -n "$out" ] || out="$(onionwarden_var_dir)/baseline.candidate"
+  rm -rf "$out"; mkdir -p "$out/state"
+
+  log_info "collecting baseline for host '$host_id' into $out"
+  "$_bin_dir/onionwarden-detect-profile" "$out/state/profile.state" >/dev/null
+  export _PROF_FILE="$out/state/profile.state"
+
+  for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
+    [ -f "$cf" ] || continue
+    name=$(basename "$cf" .sh)
+    [ "$name" = "profile" ] && continue   # profile.state already written
+    if ! bash "$cf" collect --profile "$out/state/profile.state" \
+         > "$out/state/$name.state" 2>/dev/null; then
+      log_warn "collect: check '$name' failed — state file may be incomplete"
+    fi
+  done
+
+  baseline_write_manifest "$out" "$host_id"
+  reason="manual baseline capture"
+  [ "$after_apt" = "yes" ] && reason="post-apt re-baseline ($(date -u +%F))"
+  printf '%s\n' "$reason" > "$out/REASON"
+
+  cat >&2 <<EOF
+baseline candidate written: $out
+  manifest:  $out/manifest.json   (UNSIGNED)
+Next steps (off-box, PLAN §5):
+  1. pull $out to the trusted signing host
+  2. onionwarden-baseline diff --baseline <current> --candidate $out
+  3. onionwarden-sign sign --key <priv> --file $out/manifest.json
+  4. push the signed manifest.json + manifest.json.sig + state/ to the host
+EOF
+}
+
+# classify additions/removals between two state files of one check.
+do_diff() {
+  [ -n "$baseline" ] && [ -n "$candidate" ] || { echo "diff needs --baseline and --candidate" >&2; exit 1; }
+  [ -d "$baseline/state" ] || die "no state/ under $baseline"
+  [ -d "$candidate/state" ] || die "no state/ under $candidate"
+
+  local sf name te_count=0 contraction_count=0 change_count=0
+  local all_states
+  all_states=$( { ls "$baseline/state"; ls "$candidate/state"; } 2>/dev/null | sort -u )
+
+  printf '=== baseline diff: %s -> %s ===\n' "$baseline" "$candidate"
+  while IFS= read -r sf; do
+    [ -n "$sf" ] || continue
+    name=${sf%.state}
+    local b="$baseline/state/$sf" c="$candidate/state/$sf"
+    [ -f "$b" ] || b="/dev/null"
+    [ -f "$c" ] || c="/dev/null"
+    local added removed line prefix
+    added=$(comm -13 <(sort -u "$b") <(sort -u "$c") || true)
+    removed=$(comm -23 <(sort -u "$b") <(sort -u "$c") || true)
+    [ -z "$added" ] && [ -z "$removed" ] && continue
+    printf -- '--- %s ---\n' "$name"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      prefix=${line%% *}
+      if printf ' %s ' "$_TRUST_EXPANDING" | grep -q " $prefix "; then
+        printf '  [TRUST-EXPANDING +] %s\n' "$line"
+        te_count=$(( te_count + 1 ))
+      else
+        printf '  [change +]          %s\n' "$line"
+        change_count=$(( change_count + 1 ))
+      fi
+    done <<< "$added"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '  [contraction -]     %s\n' "$line"
+      contraction_count=$(( contraction_count + 1 ))
+    done <<< "$removed"
+  done <<< "$all_states"
+
+  printf '\n=== summary ===\n'
+  printf 'trust-expanding deltas: %s\n' "$te_count"
+  printf 'other changes:          %s\n' "$change_count"
+  printf 'contractions:           %s\n' "$contraction_count"
+
+  # C1 gate.
+  if [ "$te_count" -gt 0 ] && [ "$attested" != "yes" ]; then
+    printf 'SIGNABLE: NO — %s trust-expanding delta(s) require an out-of-band scan (PLAN §5 C1).\n' "$te_count"
+    printf 'Re-run with --offline-scan-attested ONLY after the offline scan backs those deltas.\n'
+    exit 2
+  fi
+  if [ "$te_count" -gt 0 ]; then
+    printf 'SIGNABLE: YES — %s trust-expanding delta(s), offline scan attested by operator.\n' "$te_count"
+  else
+    printf 'SIGNABLE: YES — contractions/changes only, no offline scan required.\n'
+  fi
+}
+
+case "$cmd" in
+  collect) do_collect ;;
+  diff)    do_diff ;;
+  ""|-h|--help) usage 0 ;;
+  *) printf 'onionwarden-baseline: unknown command: %s\n' "$cmd" >&2; usage 1 ;;
+esac
