@@ -39,20 +39,40 @@ onionwarden_http_post() {
 
 # --- 1. dead-man's switch -------------------------------------------------
 # deadman_ping ok|fail  (PRIMARY trust anchor — alerting-on-absence).
+#
+# R8-2: a /fail ping that fails to deliver sets a pending-fail marker; while it
+# is set, EVERY run pings /fail (even a clean one) until one lands — so a clean
+# run can never reset the provider's timer and mask an undelivered CRIT.
 deadman_ping() {
   local status=$1
-  local provider url
+  local provider url marker target
   provider=$(cfg_get deadman_provider "healthchecks-saas")
   url=$(cfg_get deadman_url "")
   [ -n "$url" ] || { log_warn "alert: deadman_url unset — skipping heartbeat"; return 0; }
-  local target="$url"
-  [ "$status" = "fail" ] && target="${url%/}/fail"
+  marker="$(onionwarden_state_dir)/deadman_pending_fail"
+
+  if [ "$status" = "fail" ] || [ -f "$marker" ]; then
+    target="${url%/}/fail"
+  else
+    target="$url"
+  fi
+
   if _alert_sink; then
     printf '%s %s %s\n' "$(now_iso)" "$provider" "$target" >> "$ONIONWARDEN_ALERT_SINK/deadman"
+    case "$target" in */fail) rm -f "$marker" 2>/dev/null || true ;; esac
     return 0
   fi
-  onionwarden_http_post "$target" "onionwarden heartbeat $(now_iso)" || \
+
+  if onionwarden_http_post "$target" "onionwarden heartbeat $(now_iso)"; then
+    case "$target" in */fail) rm -f "$marker" 2>/dev/null || true ;; esac
+  else
     log_warn "alert: dead-man ping to $target failed"
+    case "$target" in
+      */fail)
+        mkdir -p "$(onionwarden_state_dir)" 2>/dev/null || true
+        : > "$marker" 2>/dev/null || true ;;
+    esac
+  fi
 }
 
 # --- 2. ntfy push ---------------------------------------------------------

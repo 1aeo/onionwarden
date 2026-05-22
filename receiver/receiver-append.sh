@@ -40,6 +40,9 @@ while IFS= read -r line; do
     | sed -n 's/.*"host_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]\{1,64\}\)".*/\1/p')
   [ -n "$host" ] || host="_unknown"
   case "$host" in *[!A-Za-z0-9_-]*) host="_invalid" ;; esac
+  # R8-3: `_`/`.`-leading IDs are receiver-reserved (quarantine + hidden dirs).
+  # A host must not be able to file itself under one to escape verification.
+  case "$host" in [._]*) host="_invalid" ;; esac
 
   hd="$RECVROOT/$host"
   mkdir -p "$hd"

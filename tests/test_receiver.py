@@ -23,6 +23,25 @@ def _receiver(root, *args):
                           capture_output=True, text=True, env=env)
 
 
+def test_deadman_pending_fail_forces_fail_ping(tmp_path):  # R8-2
+    """A pending-fail marker forces /fail even on a clean `ok` ping, so a clean
+    run cannot reset the provider timer and mask an undelivered CRIT."""
+    state = tmp_path / "state"; state.mkdir()
+    (state / "deadman_pending_fail").touch()
+    sink = tmp_path / "sink"; sink.mkdir()
+    conf = tmp_path / "host.conf"
+    conf.write_text('host_id="t"\nrole="generic"\n'
+                    'deadman_url = "https://x.invalid/dm"\n')
+    env = {**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
+           "ONIONWARDEN_STATE_DIR": str(state), "ONIONWARDEN_ALERT_SINK": str(sink)}
+    script = (f'. "{ROOT}/lib/alert.sh"; '
+              f'cfg_load "{conf}" "{ROOT}/roles"; deadman_ping ok')
+    subprocess.run([BASH, "-c", script], env=env, check=True,
+                   capture_output=True, text=True)
+    assert "/fail" in (sink / "deadman").read_text()
+    assert not (state / "deadman_pending_fail").exists()  # cleared on success
+
+
 def _ev(seq, host, kind="finding", sev="INFO", detail=None):
     o = {"seq": seq, "ts": "2026-05-21T10:00:00Z", "host_id": host,
          "kind": kind, "severity": sev}
@@ -95,3 +114,27 @@ def test_digest_rolls_up(tmp_path):
     _append(tmp_path, [_ev(1, "relay-a", "finding", "CRIT")])
     r = _receiver(tmp_path, "digest")
     assert r.returncode == 0 and "relay-a" in r.stdout
+
+
+def test_verify_check_uses_highest_seq_not_file_order(tmp_path):  # R8-1
+    """A replayed lower-seq good selfreport appended AFTER a bad one must not
+    mask the mismatch — latest is selected by seq, not file order."""
+    _append(tmp_path, [_ev(1, "relay-a", "selfreport", "INFO",
+                           {"selfhash": "good", "pubkeyhash": "good"})])
+    _receiver(tmp_path, "verify-record")
+    _append(tmp_path, [
+        _ev(3, "relay-a", "selfreport", "INFO",
+            {"selfhash": "BAD", "pubkeyhash": "good"}),
+        _ev(1, "relay-a", "selfreport", "INFO",      # replay, lower seq, last
+            {"selfhash": "good", "pubkeyhash": "good"}),
+    ])
+    r = _receiver(tmp_path, "verify-check")
+    assert r.returncode == 2 and "MISMATCH" in r.stdout
+
+
+def test_append_rejects_underscore_host_id(tmp_path):  # R8-3
+    """A host cannot file itself under a receiver-reserved `_`-prefixed dir
+    (which verify-check/seqcheck/digest exclude) to escape verification."""
+    _append(tmp_path, ['{"host_id":"_evil","kind":"finding","severity":"WARN"}'])
+    assert not (tmp_path / "_evil" / "events.log").exists()
+    assert (tmp_path / "_invalid" / "events.log").exists()

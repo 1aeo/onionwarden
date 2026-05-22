@@ -57,11 +57,29 @@ def read_events(host_dir):
 
 
 def latest_of_kind(host_dir, kind):
-    found = None
+    """The newest event of KIND — selected by the highest `seq` (R8-1), not by
+    file order, so a replayed lower-seq entry cannot masquerade as latest."""
+    best = None
+    best_seq = None
     for ev in read_events(host_dir):
-        if ev.get("kind") == kind:
-            found = ev
-    return found
+        if ev.get("kind") != kind:
+            continue
+        seq = ev.get("seq")
+        if isinstance(seq, int):
+            if best_seq is None or seq > best_seq:
+                best, best_seq = ev, seq
+        elif best_seq is None:
+            best = ev
+    return best
+
+
+def events_log_age_seconds(host_dir):
+    """Seconds since the host's events.log was last appended (receiver-side
+    mtime — not a host-controlled timestamp). None if there is no log."""
+    path = os.path.join(host_dir, "events.log")
+    if not os.path.isfile(path):
+        return None
+    return time.time() - os.path.getmtime(path)
 
 
 def ntfy(title, body):
@@ -98,7 +116,18 @@ def cmd_verify_record(hosts):
 
 def cmd_verify_check():
     mismatches = 0
+    stale_minutes = int(os.environ.get("ONIONWARDEN_STALE_MINUTES", "30"))
     for host, hd in host_dirs():
+        # R8-3: a host that has stopped APPENDING has gone dark on the
+        # receiver even if its dead-man pings still arrive (separate channel,
+        # or its events were redirected via a forged host_id).
+        age = events_log_age_seconds(hd)
+        if age is not None and age > stale_minutes * 60:
+            mismatches += 1
+            msg = ("CRIT  %s — events.log silent for %d min (> %d) — host has "
+                   "stopped appending" % (host, age / 60, stale_minutes))
+            print(msg)
+            ntfy("onionwarden receiver CRIT: %s silent" % host, msg)
         kg_path = os.path.join(hd, "known_good.json")
         if not os.path.isfile(kg_path):
             print("WARN  %s — no known-good recorded (run verify-record)" % host)

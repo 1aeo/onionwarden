@@ -106,3 +106,19 @@ the OEM `O` carve-out. Two lower-grade issues: post-reboot bit clears emitted
 one INFO per bit forever (now one consolidated INFO with reboot-aware wording),
 and bits 8 (`A`) and 17 (`T`) — real kernel taint bits — were missing from the
 decoder table (now added). Two updated tests; 123 pass.
+
+## Round 8 — Off-box transport
+Examined receiver auth, replay protection, and alert-path resilience during an
+outage. Three real holes. `verify-check` took the *last line by file order* as
+the latest self-report — so a compromised host could append a replayed old
+good self-hash after its real bad one and the receiver would read "ok". A
+`/fail` dead-man ping that failed to deliver was never retried, and the next
+clean `ok` ping reset the provider's staleness timer — a CRIT during a network
+blip could be missed entirely on the PRIMARY trust anchor. And the append
+handler allowed `_`-leading host_ids while the receiver tooling excludes
+`_`-prefixed directories — a host reporting `host_id="_x"` vanished from
+verify-check, seqcheck, and the digest while still looking alive. Fixes:
+`latest_of_kind` selects by highest `seq`; a failed `/fail` sets a pending
+marker that forces `/fail` every run until one lands; the append handler routes
+`_`/`.`-leading IDs to `_invalid`, and `verify-check` now flags a host whose
+events.log has gone stale (stopped appending). Three new tests; 126 pass.
