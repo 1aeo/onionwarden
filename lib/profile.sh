@@ -73,10 +73,21 @@ profile_detect() {
   fi
   printf 'is_hypervisor=%s\n' "$is_hyper"
 
-  # Cloud instance: cloud-init present, or a known cloud DMI vendor.
+  # Cloud instance: cloud-init present AND not disabled, or a known cloud DMI
+  # vendor. The Ubuntu live installer drops `/etc/cloud/cloud-init.disabled`
+  # after first boot on bare-metal installs; cloud-init's systemd generator
+  # then writes `/run/cloud-init/disabled` at boot and short-circuits all four
+  # cloud-init units. Treating either marker as authoritative avoids flagging
+  # is_cloud=true on bare-metal hosts that ship cloud-init purely as a
+  # first-boot installer helper (relay-a et al). DMI vendor still wins:
+  # AWS/GCP/Azure/etc. lie about being bare-metal sometimes.
   local is_cloud="false" vendor=""
   [ -r /sys/class/dmi/id/sys_vendor ] && vendor=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)
-  if [ -d /run/cloud-init ]; then is_cloud="true"; fi
+  if [ -d /run/cloud-init ] \
+     && [ ! -e /run/cloud-init/disabled ] \
+     && [ ! -e /etc/cloud/cloud-init.disabled ]; then
+    is_cloud="true"
+  fi
   case "$vendor" in
     *Amazon*|*Google*|*Microsoft*|*DigitalOcean*|*Hetzner*) is_cloud="true" ;;
   esac

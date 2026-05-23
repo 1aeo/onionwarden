@@ -9,9 +9,13 @@
 # knob `expected_listen_binding_<port>_<proto>` declares which bind IP(s) the
 # operator expects. A listener whose actual bind violates the expectation is a
 # `listener_binding` finding — CRIT when it has regressed to a wildcard
-# (0.0.0.0 / [::]) for a port in expected_lan_ports, WARN otherwise. The check
-# is independent of the baseline diff: a baselined-but-regressed listener still
-# fires (the regression itself is what matters, not the baseline).
+# (0.0.0.0 / [::]) on a port whose declared expectation forbids wildcards
+# (loopback / local / specific IP / set), WARN for non-wildcard-to-non-wildcard
+# mismatches (e.g. wrong specific IP). Rationale: a wildcard regression always
+# WIDENS exposure beyond the operator's declared bind — for loopback-only
+# Cursor sessions it leaks beyond localhost; for a LAN-bound BGP daemon it
+# offers the port to the whole world. The check is independent of the
+# baseline diff: a baselined-but-regressed listener still fires.
 set -euo pipefail
 
 # shellcheck source=lib/check_runtime.sh
@@ -115,10 +119,12 @@ ports_analyze() {
     [ "$items" = "any" ] && continue       # no expectation → skip
     if ! _binding_matches "$addr" "$items"; then
       sev="WARN"
-      # "Regressed to wildcard" — port in expected_lan_ports AND actual is a
-      # wildcard. Any non-`any` expectation that got wildcarded is the BGP-style
-      # regression we want to page on.
-      if _is_strict_wildcard "$addr" && cfg_list_has expected_lan_ports "$port"; then
+      # Wildcard regression: the operator declared a non-wildcard expectation
+      # (loopback / local / specific IP / set) and the listener is now bound
+      # to 0.0.0.0 or [::] — exposure has WIDENED beyond declared intent.
+      # Always CRIT (loopback→wildcard is an exfil-channel leak; LAN-IP→
+      # wildcard is the BGP-style world-exposed regression).
+      if _is_strict_wildcard "$addr"; then
         sev="CRIT"
       fi
       exp_summary=$(printf '%s' "$items" | tr '\n' ',' | sed 's/,$//')

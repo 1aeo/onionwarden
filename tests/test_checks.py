@@ -127,12 +127,27 @@ def test_binding_loopback_token_match():
     assert _binding_findings(f) == []
 
 
-def test_binding_loopback_token_mismatch_warn():
+def test_binding_loopback_token_wildcard_is_crit():
+    """Loopback-only expectation leaked to wildcard — CRIT (Cursor-style:
+    a loopback-only service that suddenly exposes itself externally is an
+    exfil-channel regression, not a soft warning)."""
     cfg = GENERIC + 'expected_listen_binding_3000_tcp = "loopback"\n'
     f = run_analyze("ports", ["listener tcp 0.0.0.0 3000 node"],
                     ["listener tcp 0.0.0.0 3000 node"], cfg)
     b = _binding_findings(f)
-    assert b and b[0]["severity"] == "WARN"
+    assert b and b[0]["severity"] == "CRIT"
+
+
+def test_binding_relay-a_cursor_loopback_clean_no_finding():
+    """Mirrors relay-a's Cursor remote-dev state: node bound to 127.0.0.1
+    on the ports declared with `loopback` constraint. No finding."""
+    cfg = (GENERIC
+           + 'expected_listen_binding_35425_tcp = "loopback"\n'
+           + 'expected_listen_binding_46689_tcp = "loopback"\n')
+    cur = ["listener tcp 127.0.0.1 35425 node",
+           "listener tcp 127.0.0.1 46689 node"]
+    f = run_analyze("ports", cur, cur, cfg)
+    assert _binding_findings(f) == []
 
 
 def test_binding_local_token_match():
@@ -142,11 +157,14 @@ def test_binding_local_token_match():
     assert _binding_findings(f) == []
 
 
-def test_binding_local_token_mismatch():
+def test_binding_local_token_wildcard_is_crit():
+    """`local` (specific-IP) expectation regressed to wildcard — CRIT (tor
+    relay on 198.51.100.1.x:443 leaking to 0.0.0.0:443 widens exposure beyond the
+    operator's per-IP bind plan)."""
     cfg = GENERIC + 'expected_listen_binding_443_tcp = "local"\n'
     f = run_analyze("ports", ["listener tcp 0.0.0.0 443 tor"],
                     ["listener tcp 0.0.0.0 443 tor"], cfg)
-    assert _binding_findings(f) and _binding_findings(f)[0]["severity"] == "WARN"
+    assert _binding_findings(f) and _binding_findings(f)[0]["severity"] == "CRIT"
 
 
 def test_binding_any_token_no_finding():
@@ -205,24 +223,28 @@ def test_binding_per_protocol_tcp_vs_udp_independent():
                     ["listener udp 0.0.0.0 53 dnsmasq"],
                     ["listener udp 0.0.0.0 53 dnsmasq"], cfg)
     assert _binding_findings(f) == []
-    # tcp/53 with the same wildcard DOES fire (loopback expected)
+    # tcp/53 with the same wildcard DOES fire (loopback expected -> CRIT)
     f = run_analyze("ports",
                     ["listener tcp 0.0.0.0 53 dnsmasq"],
                     ["listener tcp 0.0.0.0 53 dnsmasq"], cfg)
-    assert _binding_findings(f) and _binding_findings(f)[0]["severity"] == "WARN"
+    assert _binding_findings(f) and _binding_findings(f)[0]["severity"] == "CRIT"
 
 
 def test_binding_relay-a_bgp_current_state_no_finding():
-    """Mirrors relay-a's post-rebind BGP state: bgpd on 203.0.113.50:179."""
+    """Mirrors relay-a's post-rebind state: sshd on per-host port <SSH_PORT>,
+    bgpd on 203.0.113.50:179, 192 tor instances on 198.51.100.1.x:443, Cursor
+    on loopback. Whole-host quiet — no listener_binding findings."""
     cfg = (GENERIC
-           + "expected_lan_ports = [22, 179, 443]\n"
-           + 'expected_listen_binding_179_tcp = "203.0.113.50"\n'
-           + 'expected_listen_binding_22_tcp  = "any"\n'
-           + 'expected_listen_binding_443_tcp = "local"\n')
-    cur = ["listener tcp 0.0.0.0 22 sshd",
+           + "expected_lan_ports = [<SSH_PORT>, 179, 443]\n"
+           + 'expected_listen_binding_179_tcp   = "203.0.113.50"\n'
+           + 'expected_listen_binding_<SSH_PORT>_tcp = "any"\n'
+           + 'expected_listen_binding_443_tcp   = "local"\n'
+           + 'expected_listen_binding_35425_tcp = "loopback"\n')
+    cur = ["listener tcp 203.0.113.50 <SSH_PORT> sshd",
            "listener tcp 203.0.113.50 179 bgpd",
            "listener tcp 198.51.100.1.1 443 tor",
            "listener tcp 198.51.100.1.99 443 tor",
+           "listener tcp 127.0.0.1 35425 node",
            "listener tcp 127.0.0.1 5353 systemd-resolve"]
     f = run_analyze("ports", cur, cur, cfg)
     assert _binding_findings(f) == []
