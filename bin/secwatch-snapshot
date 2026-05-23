@@ -24,6 +24,7 @@ ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd)
 HOST=""
 OUT=""
 WITH_SUDO=0
+PRINT_BUNDLE=0
 SSH_OPTS=()
 REMOTE_TIMEOUT="${ONIONWARDEN_SNAPSHOT_TIMEOUT:-900}"
 PERCHECK_TIMEOUT="${ONIONWARDEN_SNAPSHOT_PERCHECK:-60}"
@@ -32,18 +33,21 @@ usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --out)       OUT=$2; shift 2 ;;
-    --with-sudo) WITH_SUDO=1; shift ;;
-    --ssh-opt)   SSH_OPTS+=( "$2" ); shift 2 ;;
-    -h|--help)   usage 0 ;;
-    -*)          echo "onionwarden-snapshot: unknown option: $1" >&2; usage 1 ;;
-    *)           [ -z "$HOST" ] || die "only one HOST may be given"; HOST=$1; shift ;;
+    --out)          OUT=$2; shift 2 ;;
+    --with-sudo)    WITH_SUDO=1; shift ;;
+    --ssh-opt)      SSH_OPTS+=( "$2" ); shift 2 ;;
+    --print-bundle) PRINT_BUNDLE=1; shift ;;
+    -h|--help)      usage 0 ;;
+    -*)             echo "onionwarden-snapshot: unknown option: $1" >&2; usage 1 ;;
+    *)              [ -z "$HOST" ] || die "only one HOST may be given"; HOST=$1; shift ;;
   esac
 done
-[ -n "$HOST" ] || { echo "onionwarden-snapshot: HOST is required" >&2; usage 1; }
+[ -n "$HOST" ] || [ "$PRINT_BUNDLE" = 1 ] || { echo "onionwarden-snapshot: HOST is required" >&2; usage 1; }
 
-[ -n "$OUT" ] || OUT="$ONIONWARDEN_ROOT/snapshots/${HOST}-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$OUT/raw"
+if [ "$PRINT_BUNDLE" != 1 ]; then
+  [ -n "$OUT" ] || OUT="$ONIONWARDEN_ROOT/snapshots/${HOST}-$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$OUT/raw"
+fi
 
 _ssh() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
@@ -51,20 +55,24 @@ _ssh() {
 }
 
 # --- preflight: a non-interactive SSH session must work, or fail loud --------
-log_info "snapshot: preflight — testing non-interactive SSH to '$HOST'"
-if ! _ssh true >/dev/null 2>&1; then
-  die "cannot SSH to '$HOST' non-interactively (BatchMode). Configure key-based SSH first — refusing to degrade."
-fi
-REMOTE_USER=$(_ssh 'id -un' 2>/dev/null || printf 'unknown')
-REMOTE_UID=$(_ssh 'id -u' 2>/dev/null || printf 'unknown')
-REMOTE_OS=$(_ssh '. /etc/os-release 2>/dev/null; printf "%s %s" "${ID:-?}" "${VERSION_ID:-?}"' 2>/dev/null || printf 'unknown')
-log_info "snapshot: connected — remote user=$REMOTE_USER uid=$REMOTE_UID os=$REMOTE_OS"
-
-if [ "$WITH_SUDO" = 1 ]; then
-  if ! _ssh 'sudo -n true' >/dev/null 2>&1; then
-    die "--with-sudo requested but 'sudo -n' is not available for $REMOTE_USER on $HOST — refusing to degrade."
+if [ "$PRINT_BUNDLE" = 1 ]; then
+  REMOTE_USER=""; REMOTE_UID=""; REMOTE_OS=""
+else
+  log_info "snapshot: preflight — testing non-interactive SSH to '$HOST'"
+  if ! _ssh true >/dev/null 2>&1; then
+    die "cannot SSH to '$HOST' non-interactively (BatchMode). Configure key-based SSH first — refusing to degrade."
   fi
-  log_info "snapshot: --with-sudo enabled (sudo -n confirmed)"
+  REMOTE_USER=$(_ssh 'id -un' 2>/dev/null || printf 'unknown')
+  REMOTE_UID=$(_ssh 'id -u' 2>/dev/null || printf 'unknown')
+  REMOTE_OS=$(_ssh '. /etc/os-release 2>/dev/null; printf "%s %s" "${ID:-?}" "${VERSION_ID:-?}"' 2>/dev/null || printf 'unknown')
+  log_info "snapshot: connected — remote user=$REMOTE_USER uid=$REMOTE_UID os=$REMOTE_OS"
+
+  if [ "$WITH_SUDO" = 1 ]; then
+    if ! _ssh 'sudo -n true' >/dev/null 2>&1; then
+      die "--with-sudo requested but 'sudo -n' is not available for $REMOTE_USER on $HOST — refusing to degrade."
+    fi
+    log_info "snapshot: --with-sudo enabled (sudo -n confirmed)"
+  fi
 fi
 
 # --- build the self-contained collector bundle ------------------------------
@@ -92,7 +100,15 @@ done
 
 {
   printf '#!/usr/bin/env bash\n'
-  printf 'set -uo pipefail\n'           # NOT -e: one bad collector must not abort
+  # Preamble: NO `-u` and NO `-e`. Inlined check_runtime.sh and common.sh have
+  # `_crt_dir="$(dirname "${BASH_SOURCE[0]}")"` and a similar line in
+  # onionwarden_root() — under bash 5 `bash -s`, BASH_SOURCE has 0 elements so
+  # `${BASH_SOURCE[0]}` is unbound and tripped `set -u` (silently truncating
+  # network_deep and process_ancestry output). Just `pipefail` is enough for
+  # the bundle wrapper; each inlined check file re-enables -e/-u in its own
+  # preamble for the duration of its top-level code (function defs), and the
+  # driver below explicitly disables both before invoking collectors.
+  printf 'set -o pipefail\n'
   printf 'export ONIONWARDEN_ROOT=/nonexistent-remote\n'
   for lib in common config profile apt_correlate check_runtime; do
     _strip "$ONIONWARDEN_ROOT/lib/$lib.sh"
@@ -100,7 +116,11 @@ done
   for c in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     _strip "$c"
   done
-  printf 'set +e\n'
+  # Collector runtime: -e OFF (one bad collector must not abort the bundle)
+  # AND -u OFF (BASH_SOURCE[0] accesses in inlined libs must not fault). Each
+  # check's `set -euo pipefail` re-enabled both at inline time; turn both off
+  # here before the loop runs.
+  printf 'set +eu\n'
   printf 'set -m\n'   # job control: each `( ) &` becomes its own process group
   printf '__PERCHECK=%s\n' "$PERCHECK_TIMEOUT"
   # Per-collector timeout: one slow collector (e.g. network_deep on a relay
@@ -131,6 +151,13 @@ __SNAPFN__
 if ! bash -n "$BUNDLE" 2>/dev/null; then
   die "snapshot: generated collector bundle failed syntax check — aborting (no SSH attempted)"
 fi
+
+# --- --print-bundle: tests + operators inspect the wire payload, no SSH ----
+if [ "$PRINT_BUNDLE" = 1 ]; then
+  cat "$BUNDLE"
+  exit 0
+fi
+
 log_info "snapshot: collector bundle built ($(wc -l < "$BUNDLE" | tr -d ' ') lines)"
 
 # --- run the bundle remotely, read-only -------------------------------------
