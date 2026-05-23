@@ -99,6 +99,148 @@ def test_ports_allowlist_demotes():
     assert f[0]["severity"] == "INFO"
 
 
+# --- listener_binding (expected_listen_binding_<port>_<proto>) ----
+def _binding_findings(findings):
+    return [f for f in findings if f.get("signal") == "listener_binding"]
+
+
+def test_binding_exact_ip_match_no_finding():
+    cfg = GENERIC + 'expected_listen_binding_179_tcp = "203.0.113.50"\n'
+    f = run_analyze("ports",
+                    ["listener tcp 203.0.113.50 179 bgpd"],
+                    ["listener tcp 203.0.113.50 179 bgpd"], cfg)
+    assert _binding_findings(f) == []
+
+
+def test_binding_set_match_no_finding():
+    cfg = GENERIC + 'expected_listen_binding_22_tcp = ["192.0.2.50", "127.0.0.1"]\n'
+    f = run_analyze("ports",
+                    ["listener tcp 127.0.0.1 22 sshd"],
+                    ["listener tcp 127.0.0.1 22 sshd"], cfg)
+    assert _binding_findings(f) == []
+
+
+def test_binding_loopback_token_match():
+    cfg = GENERIC + 'expected_listen_binding_3000_tcp = "loopback"\n'
+    f = run_analyze("ports", ["listener tcp 127.0.0.1 3000 node"],
+                    ["listener tcp 127.0.0.1 3000 node"], cfg)
+    assert _binding_findings(f) == []
+
+
+def test_binding_loopback_token_mismatch_warn():
+    cfg = GENERIC + 'expected_listen_binding_3000_tcp = "loopback"\n'
+    f = run_analyze("ports", ["listener tcp 0.0.0.0 3000 node"],
+                    ["listener tcp 0.0.0.0 3000 node"], cfg)
+    b = _binding_findings(f)
+    assert b and b[0]["severity"] == "WARN"
+
+
+def test_binding_local_token_match():
+    cfg = GENERIC + 'expected_listen_binding_443_tcp = "local"\n'
+    f = run_analyze("ports", ["listener tcp 198.51.100.1.42 443 tor"],
+                    ["listener tcp 198.51.100.1.42 443 tor"], cfg)
+    assert _binding_findings(f) == []
+
+
+def test_binding_local_token_mismatch():
+    cfg = GENERIC + 'expected_listen_binding_443_tcp = "local"\n'
+    f = run_analyze("ports", ["listener tcp 0.0.0.0 443 tor"],
+                    ["listener tcp 0.0.0.0 443 tor"], cfg)
+    assert _binding_findings(f) and _binding_findings(f)[0]["severity"] == "WARN"
+
+
+def test_binding_any_token_no_finding():
+    cfg = GENERIC + 'expected_listen_binding_22_tcp = "any"\n'
+    f = run_analyze("ports",
+                    ["listener tcp 0.0.0.0 22 sshd"],
+                    ["listener tcp 0.0.0.0 22 sshd"], cfg)
+    assert _binding_findings(f) == []
+
+
+def test_binding_no_entry_defaults_any():
+    f = run_analyze("ports",
+                    ["listener tcp 0.0.0.0 22 sshd"],
+                    ["listener tcp 0.0.0.0 22 sshd"], GENERIC)
+    assert _binding_findings(f) == []
+
+
+def test_binding_wildcard_regression_is_crit_when_in_lan_ports():
+    cfg = (GENERIC
+           + "expected_lan_ports = [179]\n"
+           + 'expected_listen_binding_179_tcp = "203.0.113.50"\n')
+    f = run_analyze("ports",
+                    ["listener tcp 203.0.113.50 179 bgpd"],
+                    ["listener tcp 0.0.0.0 179 bgpd"], cfg)
+    b = _binding_findings(f)
+    assert b and b[0]["severity"] == "CRIT" and "regression" in b[0]["summary"]
+    assert "203.0.113.50" in b[0]["summary"] and "0.0.0.0" in b[0]["summary"]
+
+
+def test_binding_other_specific_ip_mismatch_is_warn():
+    cfg = (GENERIC
+           + "expected_lan_ports = [179]\n"
+           + 'expected_listen_binding_179_tcp = "203.0.113.50"\n')
+    f = run_analyze("ports",
+                    ["listener tcp 203.0.113.50 179 bgpd"],
+                    ["listener tcp 203.0.113.99 179 bgpd"], cfg)
+    b = _binding_findings(f)
+    assert b and b[0]["severity"] == "WARN"
+
+
+def test_binding_ipv6_wildcard_regression_is_crit():
+    cfg = (GENERIC
+           + "expected_lan_ports = [179]\n"
+           + 'expected_listen_binding_179_tcp = "203.0.113.50"\n')
+    f = run_analyze("ports",
+                    ["listener tcp 203.0.113.50 179 bgpd"],
+                    ["listener tcp [::] 179 bgpd"], cfg)
+    b = _binding_findings(f)
+    assert b and b[0]["severity"] == "CRIT"
+
+
+def test_binding_per_protocol_tcp_vs_udp_independent():
+    # only tcp/53 has an expectation; udp/53 must use the default "any"
+    cfg = GENERIC + 'expected_listen_binding_53_tcp = "loopback"\n'
+    f = run_analyze("ports",
+                    ["listener udp 0.0.0.0 53 dnsmasq"],
+                    ["listener udp 0.0.0.0 53 dnsmasq"], cfg)
+    assert _binding_findings(f) == []
+    # tcp/53 with the same wildcard DOES fire (loopback expected)
+    f = run_analyze("ports",
+                    ["listener tcp 0.0.0.0 53 dnsmasq"],
+                    ["listener tcp 0.0.0.0 53 dnsmasq"], cfg)
+    assert _binding_findings(f) and _binding_findings(f)[0]["severity"] == "WARN"
+
+
+def test_binding_relay-a_bgp_current_state_no_finding():
+    """Mirrors relay-a's post-rebind BGP state: bgpd on 203.0.113.50:179."""
+    cfg = (GENERIC
+           + "expected_lan_ports = [22, 179, 443]\n"
+           + 'expected_listen_binding_179_tcp = "203.0.113.50"\n'
+           + 'expected_listen_binding_22_tcp  = "any"\n'
+           + 'expected_listen_binding_443_tcp = "local"\n')
+    cur = ["listener tcp 0.0.0.0 22 sshd",
+           "listener tcp 203.0.113.50 179 bgpd",
+           "listener tcp 198.51.100.1.1 443 tor",
+           "listener tcp 198.51.100.1.99 443 tor",
+           "listener tcp 127.0.0.1 5353 systemd-resolve"]
+    f = run_analyze("ports", cur, cur, cfg)
+    assert _binding_findings(f) == []
+
+
+def test_binding_relay-a_bgp_regression_is_crit():
+    """Synthetic regression: bgpd back on 0.0.0.0:179 — must page."""
+    cfg = (GENERIC
+           + "expected_lan_ports = [22, 179, 443]\n"
+           + 'expected_listen_binding_179_tcp = "203.0.113.50"\n')
+    cur = ["listener tcp 203.0.113.50 179 bgpd"]
+    bad = ["listener tcp 0.0.0.0 179 bgpd"]
+    f = run_analyze("ports", cur, bad, cfg)
+    b = _binding_findings(f)
+    assert b and b[0]["severity"] == "CRIT"
+    assert "0.0.0.0" in b[0]["summary"] and "203.0.113.50" in b[0]["summary"]
+
+
 # --- ssh ------------------------------------------------------------------
 def test_ssh_positive_new_key_fatal():
     f = run_analyze("ssh",

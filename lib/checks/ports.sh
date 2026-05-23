@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# lib/checks/ports.sh — listening port diff (PLAN §2.2).
+# lib/checks/ports.sh — listening port diff + bind-IP expectation check (PLAN §2.2).
 #
 # ss -tulpnH normalised to proto/addr/port/process, diffed vs baseline. A new
 # listener is CRIT; if its port is allowlisted in expected_lan_ports it is the
 # operator's declared intent and demotes to INFO (PLAN §0.3 allowlist rule).
+#
+# Bind-IP expectations (the `listener_binding` signal): an optional host.conf
+# knob `expected_listen_binding_<port>_<proto>` declares which bind IP(s) the
+# operator expects. A listener whose actual bind violates the expectation is a
+# `listener_binding` finding — CRIT when it has regressed to a wildcard
+# (0.0.0.0 / [::]) for a port in expected_lan_ports, WARN otherwise. The check
+# is independent of the baseline diff: a baselined-but-regressed listener still
+# fires (the regression itself is what matters, not the baseline).
 set -euo pipefail
 
 # shellcheck source=lib/check_runtime.sh
@@ -36,12 +44,56 @@ ports_collect() {
 }
 
 # _addr_is_wildcard ADDR -> 0 if the listener is reachable beyond loopback.
+# (Lenient: also returns 0 for a specific non-loopback address — used by the
+# new-listener severity branch.)
 _addr_is_wildcard() {
   case "$1" in
     0.0.0.0|"*"|"::"|"[::]"|"") return 0 ;;
     127.*|"::1"|"[::1]") return 1 ;;
-    *) return 0 ;;  # a specific non-loopback address is also externally bound
+    *) return 0 ;;
   esac
+}
+
+# _is_strict_wildcard ADDR -> 0 ONLY for an actual v4/v6 wildcard.
+_is_strict_wildcard() {
+  case "$1" in 0.0.0.0|"*"|"::"|"[::]"|"") return 0 ;; *) return 1 ;; esac
+}
+
+# _is_loopback_addr ADDR -> 0 for a loopback address (v4 127.x.y.z or v6 ::1).
+_is_loopback_addr() {
+  case "$1" in 127.*|::1|"[::1]") return 0 ;; *) return 1 ;; esac
+}
+
+# _binding_expected_items PORT PROTO -> echo the expected-items list (newline-
+# separated). Defaults to the literal "any" if the operator set no expectation.
+_binding_expected_items() {
+  local key="expected_listen_binding_${1}_${2}" items
+  items=$(cfg_list "$key")
+  [ -n "$items" ] || items=$(cfg_get "$key" "")
+  [ -n "$items" ] || items="any"
+  printf '%s' "$items"
+}
+
+# _binding_matches ADDR ITEMS -> 0 if ADDR satisfies any item in ITEMS.
+# Accepts tokens (any|loopback|local) or specific IPs (v4 dotted, v6 bracketed
+# or bare — both forms compared for IPv6).
+_binding_matches() {
+  local addr=$1 items=$2 item naddr
+  naddr="$addr"
+  case "$addr" in \[*\]) naddr="${addr#\[}"; naddr="${naddr%\]}" ;; esac
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    case "$item" in
+      any)      return 0 ;;
+      loopback) _is_loopback_addr "$addr" && return 0 ;;
+      local)    _is_strict_wildcard "$addr" || return 0 ;;
+      *)
+        [ "$item" = "$addr" ] && return 0
+        [ "$item" = "$naddr" ] && return 0
+        ;;
+    esac
+  done <<< "$items"
+  return 1
 }
 
 ports_analyze() {
@@ -51,14 +103,37 @@ ports_analyze() {
     emit_na "$CHECK_NAME" listening_ports "ss not available"
     return 0
   fi
+
+  local base cur line proto addr port pname sev summary items exp_summary
+  cur=$(grep '^listener ' "$cur_file" 2>/dev/null | sort -u || true)
+
+  # --- bind-IP expectation check (independent of baseline diff) ------------
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    read -r _ proto addr port pname <<< "$line"
+    items=$(_binding_expected_items "$port" "$proto")
+    [ "$items" = "any" ] && continue       # no expectation → skip
+    if ! _binding_matches "$addr" "$items"; then
+      sev="WARN"
+      # "Regressed to wildcard" — port in expected_lan_ports AND actual is a
+      # wildcard. Any non-`any` expectation that got wildcarded is the BGP-style
+      # regression we want to page on.
+      if _is_strict_wildcard "$addr" && cfg_list_has expected_lan_ports "$port"; then
+        sev="CRIT"
+      fi
+      exp_summary=$(printf '%s' "$items" | tr '\n' ',' | sed 's/,$//')
+      emit_finding "$CHECK_NAME" listener_binding "$sev" \
+        "port :$port/$proto is bound to $addr but host.conf expects $exp_summary — possible bind regression" \
+        "$exp_summary" "$addr" false
+    fi
+  done <<< "$cur"
+
+  # --- diff against baseline (new / removed) — needs a baseline ------------
   if [ ! -s "$base_file" ]; then
     emit_na "$CHECK_NAME" listening_ports "no baseline listener set"
     return 0
   fi
-
-  local base cur line proto addr port pname sev summary
   base=$(grep '^listener ' "$base_file" 2>/dev/null | sort -u || true)
-  cur=$(grep '^listener ' "$cur_file" 2>/dev/null | sort -u || true)
 
   # New listeners.
   while IFS= read -r line; do
