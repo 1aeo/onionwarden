@@ -71,7 +71,15 @@ while IFS= read -r line; do
     continue
   fi
 
-  printf '%s\n' "$line" >> "$hd/events.log"
+  # R2-F2: stamp a receiver-side recv_ts on every accepted line so the
+  # staleness check has a value the host (and a local `touch` attacker)
+  # cannot move. Inject as a JSON field just before the closing '}'.
+  recv_ts=$(date -u +%FT%TZ)
+  case "$line" in
+    *'}') stamped="${line%\}},\"recv_ts\":\"$recv_ts\"}" ;;
+    *)    stamped="$line" ;;   # malformed close — pass through unstamped
+  esac
+  printf '%s\n' "$stamped" >> "$hd/events.log"
 done
 
 # Drop stale per-minute counters.

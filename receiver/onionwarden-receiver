@@ -19,6 +19,7 @@ it does not just store events. Subcommands:
 Env: ONIONWARDEN_RECEIVER_ROOT (default ~/onionwarden), ONIONWARDEN_RECEIVER_NTFY
 (optional ntfy URL for verify-check CRIT pushes).
 """
+import calendar
 import json
 import os
 import sys
@@ -74,11 +75,32 @@ def latest_of_kind(host_dir, kind):
 
 
 def events_log_age_seconds(host_dir):
-    """Seconds since the host's events.log was last appended (receiver-side
-    mtime — not a host-controlled timestamp). None if there is no log."""
+    """Seconds since the host's events.log was last appended.
+
+    R2-F2: prefer the receiver-stamped `recv_ts` of the highest-seq event
+    over file mtime. mtime is mutable by `touch` even with +a, so an
+    attacker with a shell on the receiver can mask staleness; recv_ts is
+    written by the appender and stored inside the (+a) events.log.
+    Falls back to mtime if no event has recv_ts (rolling-update compat).
+    """
     path = os.path.join(host_dir, "events.log")
     if not os.path.isfile(path):
         return None
+    best_seq = None
+    best_recv = None
+    for ev in read_events(host_dir):
+        rt = ev.get("recv_ts")
+        seq = ev.get("seq")
+        if rt and isinstance(seq, int) and (best_seq is None or seq > best_seq):
+            best_seq = seq
+            best_recv = rt
+    if best_recv:
+        try:
+            # calendar.timegm interprets the struct as UTC, so no DST math.
+            t = calendar.timegm(time.strptime(best_recv, "%Y-%m-%dT%H:%M:%SZ"))
+            return time.time() - t
+        except (ValueError, TypeError):
+            pass
     return time.time() - os.path.getmtime(path)
 
 
@@ -96,6 +118,14 @@ def ntfy(title, body):
 
 
 def cmd_verify_record(hosts):
+    """Snapshot each host's current self-hash + pubkey hash as known-good.
+
+    Writes `known_good.json` (the file used by verify-check). R2-F1: also
+    appends an audit-trail event to events.log carrying the same payload —
+    that record is +a-protected, so if the JSON file is later forged a
+    sysadmin can reconstruct the legitimate baseline by reading the last
+    `verify_record` event line.
+    """
     targets = hosts or [h for h, _ in host_dirs()]
     for host in targets:
         hd = os.path.join(ROOT, host)
@@ -110,6 +140,12 @@ def cmd_verify_record(hosts):
               "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         with open(os.path.join(hd, "known_good.json"), "w") as fh:
             json.dump(kg, fh, indent=2)
+        # R2-F1: audit-trail event in the +a events.log.
+        audit = {"seq": -1, "ts": kg["recorded_at"], "host_id": host,
+                 "kind": "verify_record", "severity": "INFO",
+                 "detail": {"recorded_known_good": kg}}
+        with open(os.path.join(hd, "events.log"), "a") as fh:
+            fh.write(json.dumps(audit, separators=(",", ":")) + "\n")
         print("recorded known-good for %s: selfhash=%s" % (host, kg["selfhash"]))
     return 0
 
@@ -191,10 +227,9 @@ def cmd_digest():
         note = ""
         for ev in read_events(hd):
             ts = ev.get("ts", "")
-            # crude 24h window by parsing the ISO timestamp
+            # crude 24h window by parsing the ISO timestamp (UTC; no DST math)
             try:
-                t = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
-                t -= time.timezone
+                t = calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
             except (ValueError, TypeError):
                 t = now
             if t < cutoff:

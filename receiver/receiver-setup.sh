@@ -39,20 +39,30 @@ cp -p "$SRC_DIR/onionwarden-receiver" "$BINDIR/onionwarden-receiver"
 chmod 0755 "$BINDIR/receiver-append.sh" "$BINDIR/onionwarden-receiver"
 
 chattr_ok=1
+apply_appendonly() {
+  # R1-F5 + R2-F3: classify failure modes; same logic for events.log and receiver.log.
+  local f=$1
+  if chattr +a "$f" 2>/tmp/cw.err; then
+    echo "receiver-setup: $f -> append-only"
+    return 0
+  fi
+  err=$(cat /tmp/cw.err 2>/dev/null || true); rm -f /tmp/cw.err
+  case "$err" in
+    *"Operation not permitted"*) echo "receiver-setup: chattr +a needs root (CAP_LINUX_IMMUTABLE) — re-run via sudo for $f"; chattr_ok=0 ;;
+    *) echo "receiver-setup: chattr +a unavailable for $f (FS limitation: $err)"; chattr_ok=0 ;;
+  esac
+  return 1
+}
+
+# R2-F3: receiver.log is also write-only in spirit; +a it too.
+[ -f "$ROOT/receiver.log" ] || : > "$ROOT/receiver.log"
+apply_appendonly "$ROOT/receiver.log"
+
 for h in $HOSTS; do
   hd="$ROOT/$h"
   mkdir -p "$hd"
   [ -f "$hd/events.log" ] || : > "$hd/events.log"
-  # R1-F5: classify the chattr failure mode rather than always blaming the FS.
-  if chattr +a "$hd/events.log" 2>/tmp/cw.err; then
-    echo "receiver-setup: $hd/events.log -> append-only"
-  else
-    err=$(cat /tmp/cw.err 2>/dev/null || true); rm -f /tmp/cw.err
-    case "$err" in
-      *"Operation not permitted"*) echo "receiver-setup: chattr +a needs root (CAP_LINUX_IMMUTABLE) — re-run via sudo for $hd"; chattr_ok=0 ;;
-      *) echo "receiver-setup: chattr +a unavailable for $hd/events.log (FS limitation: $err)"; chattr_ok=0 ;;
-    esac
-  fi
+  apply_appendonly "$hd/events.log"
 done
 
 cat <<EOF

@@ -158,3 +158,51 @@ def test_append_host_pin_passes_matching_host_id(tmp_path):  # R1-F1
     log_path = tmp_path / "receiver.log"
     if log_path.exists():
         assert "host-pin MISMATCH" not in log_path.read_text()
+
+
+def test_appender_stamps_recv_ts(tmp_path):  # R2-F2
+    """Every accepted event line carries a receiver-stamped recv_ts."""
+    _append(tmp_path, [_ev(1, "relay_a")])
+    line = (tmp_path / "relay_a" / "events.log").read_text().strip()
+    ev = json.loads(line)
+    assert "recv_ts" in ev and ev["recv_ts"].endswith("Z")
+    # original fields preserved
+    assert ev["host_id"] == "relay_a" and ev["seq"] == 1
+
+
+def test_events_log_age_uses_recv_ts_over_mtime(tmp_path):  # R2-F2
+    """A bare `touch` cannot mask staleness — recv_ts of the latest event
+    is the authoritative freshness signal."""
+    import time as _t
+    _append(tmp_path, [_ev(1, "relay_a")])
+    log = tmp_path / "relay_a" / "events.log"
+    # Backdate the recv_ts inside the file (simulating a host that hasn't
+    # appended for >1 hour) and bump mtime to "now" via touch.
+    line = log.read_text().strip()
+    ev = json.loads(line)
+    ev["recv_ts"] = "2020-01-01T00:00:00Z"
+    log.write_text(json.dumps(ev, separators=(",", ":")) + "\n")
+    _t.sleep(0.05)  # ensure mtime is fresh
+    os.utime(log, None)
+    r = _receiver(tmp_path, "verify-check", env_extra=None) if False else \
+        subprocess.run(["python3", str(RECEIVER), "verify-check"],
+                       capture_output=True, text=True,
+                       env={**os.environ,
+                            "ONIONWARDEN_RECEIVER_ROOT": str(tmp_path),
+                            "ONIONWARDEN_STALE_MINUTES": "30"})
+    assert "silent" in r.stdout  # staleness fires despite the touch
+
+
+def test_verify_record_writes_audit_event(tmp_path):  # R2-F1
+    """verify-record appends a +a-protected audit event with the known-good
+    payload, so a forged known_good.json can be cross-checked against the
+    audit trail."""
+    _append(tmp_path, [_ev(1, "relay_a", "selfreport", "INFO",
+                           {"selfhash": "aaa", "pubkeyhash": "ppp"})])
+    r = _receiver(tmp_path, "verify-record")
+    assert r.returncode == 0
+    events = (tmp_path / "relay_a" / "events.log").read_text().splitlines()
+    audit = [json.loads(l) for l in events if json.loads(l).get("kind") == "verify_record"]
+    assert len(audit) == 1
+    kg = audit[0]["detail"]["recorded_known_good"]
+    assert kg["selfhash"] == "aaa" and kg["pubkeyhash"] == "ppp"
