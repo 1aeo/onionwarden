@@ -9,6 +9,7 @@ function body. Two snapshot runs silently truncated `network_deep` and
 raw/remote-stderr.log. These tests assert the bundle now runs with `set -u`
 disabled so that single point of unsafety can never silently bite again.
 """
+import os
 import subprocess
 
 from conftest import ROOT, BASH
@@ -16,9 +17,12 @@ from conftest import ROOT, BASH
 SNAPSHOT_BIN = str(ROOT / "bin" / "onionwarden-snapshot")
 
 
-def _build_bundle():
+def _build_bundle(env=None):
+    full_env = dict(os.environ)
+    if env:
+        full_env.update(env)
     return subprocess.check_output(
-        [BASH, SNAPSHOT_BIN, "--print-bundle"], text=True)
+        [BASH, SNAPSHOT_BIN, "--print-bundle"], text=True, env=full_env)
 
 
 def test_print_bundle_emits_valid_bash():
@@ -59,14 +63,24 @@ def test_bundle_runs_under_bash_s_without_bash_source_error():
     """End-to-end: pipe the bundle through `bash -s -u` and confirm no
     'BASH_SOURCE[0]: unbound variable' surfaces. We run with -u explicitly
     enabled on the host bash to simulate the Ubuntu bash 5 behaviour as
-    closely as possible; the bundle's own `set +eu` must dominate."""
-    bundle = _build_bundle()
+    closely as possible; the bundle's own `set +eu` must dominate.
+
+    The BASH_SOURCE error would surface during the inlined-library preamble
+    or the first BASH_SOURCE-using collector — long before all 24 collectors
+    finish. On a real Linux CI runner several collectors do live filesystem
+    walks (`find / -xdev` in suid/snap, /proc walks in network_deep/
+    process_ancestry) that can each chew the default 60s per-check watchdog;
+    two of those serially blow past the test's 120s subprocess timeout
+    deterministically. We override the per-check watchdog to 3s — enough for
+    every BASH_SOURCE expansion to fire, far short of any plausible
+    cumulative timeout."""
+    bundle = _build_bundle(env={"ONIONWARDEN_SNAPSHOT_PERCHECK": "3"})
     # Run via `bash -s` reading from stdin, same way the snapshot tool ships
     # it. We capture stderr for the regression check; we don't care about
     # exit code or stdout content (most collectors no-op on the macOS test
     # host since /proc etc. are absent — that is the whole point of the
     # snapshot tool needing a real Linux target).
     p = subprocess.run([BASH, "-s"], input=bundle,
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, timeout=240)
     assert "BASH_SOURCE[0]: unbound variable" not in p.stderr, (
         f"BASH_SOURCE regression — stderr contained the very error we fixed:\n{p.stderr}")
