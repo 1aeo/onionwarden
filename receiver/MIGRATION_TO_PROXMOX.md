@@ -144,18 +144,60 @@ ssh-copy-id -i ~/.ssh/onionwarden_receiver.pub -p 22 admin@<new-host>
 | Option | Pro | Con |
 |---|---|---|
 | **Keep** (rsync as-is) | No coordination with operators — the public key in `receiver/receiver.pub` stays valid. | Staging private key was generated in a less-trusted environment (the bootstrap VM); if the staging host was ever compromised, the key is compromised too. Today nothing on the receiver uses this key, so the practical risk is zero, but a future signing change inherits any prior leak. |
-| **Rotate** | Clean cryptographic provenance — the public key is "born" on the production host. | One coordination step: regenerate, copy the new `receiver.pub` to the laptop, commit it to the repo, update any monitored host that pins the key. |
+| **Rotate** | Clean cryptographic provenance — the public key is "born" on the production host. | A coordinated 4-step rollout (below) to avoid a verification gap once signing goes live. |
 
-Recommendation: **rotate during the migration cutover**. It costs one commit
-and is the right hygienic default for a key that will eventually go live.
+Recommendation: **rotate during the migration cutover**. It costs one
+commit + one collector roll and is the right hygienic default for a key
+that will eventually go live. Use `scripts/rotate-receiver-key.sh` —
+NOT a hand-typed openssl command — so the rotation is atomic, the old
+keypair is preserved as `.bak`, and the new pubkey's sha256 fingerprint
+is printed for laptop-side verification.
 
-```sh
-# on the new host, as onionwarden:
-openssl genpkey -algorithm ed25519 -out /var/lib/onionwarden/receiver.priv
-openssl pkey -in /var/lib/onionwarden/receiver.priv -pubout -out /var/lib/onionwarden/receiver.pub
-chmod 600 /var/lib/onionwarden/receiver.priv
-# then copy receiver.pub back to the laptop and commit
-```
+### Rotate the receiver signing key (4-step dual-pin protocol)
+
+The receiver signing key is currently inert (no live consumer), so
+rotation today is zero-risk for verification. The procedure below is
+the contract that future signing-of-digests code MUST honour, so
+rotation never opens a verification gap:
+
+1. **Generate the new keypair** on the receiver:
+   ```sh
+   sudo /opt/onionwarden/scripts/rotate-receiver-key.sh
+   ```
+   This atomically swaps the live keypair to the new one and keeps the
+   old as `receiver.{priv,pub}.YYYYMMDD-HHMMSS.bak`. The script prints
+   the sha256 fingerprint of both the new and old pubkeys.
+
+2. **Publish BOTH pubkeys** to the repo fork:
+   ```sh
+   # on the laptop, after scp'ing the new pubkey back:
+   cp receiver/receiver.pub receiver/receiver.pub.prev   # the OLD one
+   cp <new-pubkey-from-receiver> receiver/receiver.pub   # the NEW one
+   git add receiver/receiver.pub receiver/receiver.pub.prev
+   git commit -m "rotate receiver signing key — overlap window opens"
+   ```
+   Verify the sha256 of `receiver.pub` matches what the script printed
+   on the receiver: `openssl dgst -sha256 receiver/receiver.pub`.
+
+3. **Roll collectors to pin BOTH pubkeys.** Once signing-of-digests is
+   live, collectors will consult `verify_pubkey_paths = ["receiver.pub",
+   "receiver.pub.prev"]` and accept a signed message verified by EITHER.
+   Confirm the rollout reached every collector before step 4.
+
+4. **After the overlap window** (≥ the longest in-flight signed-message
+   TTL; 24h is ample for the current digest cadence), remove the
+   previous pubkey:
+   ```sh
+   git rm receiver/receiver.pub.prev
+   git commit -m "close receiver-key rotation overlap window"
+   # then on the receiver:
+   sudo rm /var/lib/onionwarden/receiver.{priv,pub}.YYYYMMDD-HHMMSS.bak
+   ```
+
+Skipping or compressing this 4-step protocol (e.g. publishing the new
+pubkey AFTER rolling collectors, or omitting the `.prev` overlap) will
+make every in-flight signed message unverifiable for the duration of
+the gap.
 
 ## Migration runbook
 
