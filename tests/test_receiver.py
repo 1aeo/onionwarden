@@ -9,11 +9,12 @@ APPEND = ROOT / "receiver" / "receiver-append.sh"
 RECEIVER = ROOT / "receiver" / "onionwarden-receiver"
 
 
-def _append(root, lines, env_extra=None):
+def _append(root, lines, env_extra=None, expected_host=None):
     env = {**os.environ, "ONIONWARDEN_RECEIVER_ROOT": str(root)}
     if env_extra:
         env.update(env_extra)
-    subprocess.run([BASH, str(APPEND)], input="\n".join(lines) + "\n",
+    cmd = [BASH, str(APPEND)] + ([expected_host] if expected_host else [])
+    subprocess.run(cmd, input="\n".join(lines) + "\n",
                    text=True, env=env, check=True)
 
 
@@ -138,3 +139,22 @@ def test_append_rejects_underscore_host_id(tmp_path):  # R8-3
     _append(tmp_path, ['{"host_id":"_evil","kind":"finding","severity":"WARN"}'])
     assert not (tmp_path / "_evil" / "events.log").exists()
     assert (tmp_path / "_invalid" / "events.log").exists()
+
+
+def test_append_host_pin_rewrites_mismatched_host_id(tmp_path):  # R1-F1
+    """A key bound to relay_a (forced-command first arg) cannot file events
+    under relay_b — the event is rewritten to relay_a and a warning is
+    logged. Contains stolen-key blast radius to one host_id."""
+    _append(tmp_path, [_ev(1, "relay_b")], expected_host="relay_a")
+    assert (tmp_path / "relay_a" / "events.log").exists()
+    assert not (tmp_path / "relay_b").exists()
+    log = (tmp_path / "receiver.log").read_text()
+    assert "host-pin MISMATCH" in log and "relay_a" in log and "relay_b" in log
+
+
+def test_append_host_pin_passes_matching_host_id(tmp_path):  # R1-F1
+    _append(tmp_path, [_ev(1, "relay_a")], expected_host="relay_a")
+    assert (tmp_path / "relay_a" / "events.log").exists()
+    log_path = tmp_path / "receiver.log"
+    if log_path.exists():
+        assert "host-pin MISMATCH" not in log_path.read_text()
