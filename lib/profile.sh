@@ -105,12 +105,34 @@ profile_detect() {
 
   # Immutable-attribute (chattr +i) support depends on the FS of the install
   # prefix, not the distro. ext*/btrfs/xfs support it; tmpfs/zfs/overlay do not.
+  #
+  # `stat -f -c %T` returns the kernel's filesystem-family name, which on Linux
+  # collapses the whole ext family to the literal string "ext2/ext3" — even on
+  # ext4. /proc/mounts has the actual mount type, so prefer that: find the
+  # mount whose mountpoint is the longest prefix of our install path. Fall
+  # back to `stat -f` if /proc/mounts is unreadable (e.g. test host).
+  # ONIONWARDEN_PROC_MOUNTS overrides /proc/mounts for tests.
   local prefix="${ONIONWARDEN_PREFIX:-/opt/onionwarden}" fs="unknown" imm="false"
-  if command -v stat >/dev/null 2>&1; then
-    fs=$(stat -f -c %T "$prefix" 2>/dev/null || stat -f -c %T / 2>/dev/null || printf 'unknown')
+  local mounts_file="${ONIONWARDEN_PROC_MOUNTS:-/proc/mounts}"
+  if [ -r "$mounts_file" ]; then
+    fs=$(awk -v p="$prefix" '
+      BEGIN { best_len = 0; best_type = ""; root_type = "" }
+      $2 == "/" { root_type = $3 }
+      $2 != "/" {
+        if (substr(p "/", 1, length($2) + 1) == $2 "/" && length($2) > best_len) {
+          best_len = length($2); best_type = $3
+        }
+      }
+      END { print (best_type != "" ? best_type : (root_type != "" ? root_type : "unknown")) }
+    ' "$mounts_file" 2>/dev/null)
+  fi
+  if [ -z "$fs" ] || [ "$fs" = "unknown" ]; then
+    if command -v stat >/dev/null 2>&1; then
+      fs=$(stat -f -c %T "$prefix" 2>/dev/null || stat -f -c %T / 2>/dev/null || printf 'unknown')
+    fi
   fi
   case "$fs" in
-    ext2/ext3|ext4|btrfs|xfs) imm="true" ;;
+    ext2|ext3|ext4|ext2/ext3|btrfs|xfs) imm="true" ;;
   esac
   printf 'install_fs=%s\n' "$fs"
   printf 'immutable_fs_supported=%s\n' "$imm"
