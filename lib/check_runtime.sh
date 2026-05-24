@@ -19,6 +19,22 @@
 if [ -n "${_ONIONWARDEN_CHECK_RUNTIME_SH:-}" ]; then return 0 2>/dev/null || true; fi
 _ONIONWARDEN_CHECK_RUNTIME_SH=1
 
+# PATH normalisation. Debian 13's non-interactive shell PATH (which
+# the snapshot tool's `bash -s` wire inherits) is
+# `/usr/local/bin:/usr/bin:/bin:/usr/games` — no sbin dirs. That
+# silently breaks `command -v` discovery for admin/daemon binaries
+# (sshd, nft, dmidecode, bpftool, …) that live in /usr/sbin or
+# /sbin, and a check then emits a false `na no-<tool>`. We
+# unconditionally ensure the three sbin dirs are present in $PATH,
+# appended (so existing /usr/bin entries still win for any binary
+# that happens to live in both places). Ubuntu — where /usr/sbin
+# is in PATH already — gets a no-op. The change applies once per
+# bundle run / dispatcher tick (sourced-once guard above).
+case ":${PATH:-}:" in *:/usr/local/sbin:*) ;; *) PATH="${PATH:-/usr/bin:/bin}:/usr/local/sbin" ;; esac
+case ":$PATH:"        in *:/usr/sbin:*)       ;; *) PATH="$PATH:/usr/sbin"       ;; esac
+case ":$PATH:"        in *:/sbin:*)           ;; *) PATH="$PATH:/sbin"           ;; esac
+export PATH
+
 _crt_dir="$(dirname "${BASH_SOURCE[0]}")"
 # shellcheck source=lib/common.sh
 . "$_crt_dir/common.sh"
