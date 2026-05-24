@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            openssl jq curl bsdmainutils file
+            openssl jq curl bsdmainutils file bats
 
       - name: set up python
         uses: actions/setup-python@v5
@@ -34,4 +34,7 @@ jobs:
           python3 -m pip install pytest cryptography
 
       - name: pytest
-        run: python3 -m pytest tests/ -q
+        run: python3 -m pytest tests/ -q --ignore=tests/bats
+
+      - name: bats — onionwarden-onboard
+        run: bats tests/bats/

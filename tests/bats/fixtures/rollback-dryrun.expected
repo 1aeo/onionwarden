@@ -1,0 +1,17 @@
+
+== Rollback onionwarden on fakehost ==
+  [warn] this disables the watchdog. Confirm you have an investigation snapshot first.
+  [plan] ssh fakehost 'sudo systemctl disable --now onionwarden-fast.timer onionwarden-slow.timer onionwarden-daily.timer 2>/dev/null || true'
+  [dry-run] would: ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new fakehost 'sudo systemctl disable --now onionwarden-fast.timer onionwarden-slow.timer onionwarden-daily.timer 2>/dev/null || true'
+  [plan] ssh fakehost 'sudo crontab -l 2>/dev/null | grep -v onionwarden-run | sudo crontab -'
+  [dry-run] would: ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new fakehost 'sudo crontab -l 2>/dev/null | grep -v onionwarden-run | sudo crontab -'
+  [plan] ssh fakehost 'sudo chattr -R -i /opt/onionwarden /etc/onionwarden 2>/dev/null || true'
+  [dry-run] would: ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new fakehost 'sudo chattr -R -i /opt/onionwarden /etc/onionwarden 2>/dev/null || true'
+  [plan] ssh fakehost 'sudo chattr -i /etc/systemd/system/onionwarden-*.{timer,service} 2>/dev/null || true'
+  [dry-run] would: ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new fakehost 'sudo chattr -i /etc/systemd/system/onionwarden-*.timer /etc/systemd/system/onionwarden-*.service 2>/dev/null || true'
+  [plan] ssh fakehost 'sudo rm -rf /opt/onionwarden /etc/onionwarden /etc/systemd/system/onionwarden-*'
+  [dry-run] would: ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new fakehost 'sudo rm -rf /opt/onionwarden /etc/onionwarden /etc/systemd/system/onionwarden-*'
+  [plan] ssh fakehost 'sudo systemctl daemon-reload'
+  [dry-run] would: ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new fakehost 'sudo systemctl daemon-reload'
+  [warn] /var/lib/onionwarden and /var/log/onionwarden retained for forensics — remove by hand only after copying off
+  [ok]   rollback complete on fakehost
