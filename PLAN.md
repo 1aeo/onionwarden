@@ -1,4 +1,4 @@
-# secure-server — Ubuntu 24.04 fleet tamper-monitoring plan
+# onionwarden — Ubuntu/Debian fleet tamper-monitoring plan
 
 ## Execution TODO
 
