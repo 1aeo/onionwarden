@@ -1,6 +1,7 @@
 """Off-box receiver: append handler hardening + active verification."""
 import json
 import os
+import re
 import subprocess
 
 from conftest import ROOT, BASH
@@ -262,3 +263,25 @@ def test_verify_record_writes_audit_event(tmp_path):  # R2-F1
     assert len(audit) == 1
     kg = audit[0]["detail"]["recorded_known_good"]
     assert kg["selfhash"] == "aaa" and kg["pubkeyhash"] == "ppp"
+
+
+def test_receiver_md_cron_heredoc_has_no_empty_env_var():
+    """Regression: the cron-file heredoc in RECEIVER.md must not emit any
+    `ONIONWARDEN_*=` line with an empty value. Vixie cron 3.0pl1 on Ubuntu
+    24.04 rejects such lines as "bad minute" — the parser falls through to
+    cron-entry parsing and treats the var name as the minute field, silently
+    invalidating the entire crontab file. The heredoc must ship every such
+    env var either with a non-empty value or commented out.
+    Diagnosed on 192.0.2.41 deploy 2026-05-24."""
+    text = (ROOT / "receiver" / "RECEIVER.md").read_text()
+    m = re.search(
+        r"cat <<'EOF' > /etc/cron\.d/onionwarden-receiver\n(.*?)\nEOF",
+        text, re.DOTALL)
+    assert m, "RECEIVER.md no longer contains the expected cron-file heredoc"
+    body = m.group(1)
+    offending = [ln for ln in body.splitlines()
+                 if re.match(r"^ONIONWARDEN_[A-Z0-9_]+=\s*$", ln)]
+    assert not offending, (
+        "RECEIVER.md cron heredoc has empty-value env-var lines that Vixie "
+        "cron will reject ('bad minute'). Ship commented out instead. "
+        "Offenders: %r" % offending)
