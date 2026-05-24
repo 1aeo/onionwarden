@@ -21,7 +21,7 @@ def cfg(conf_text, snippet):
 
 
 def test_scalar_quoted():
-    assert cfg('host_id = "eval-host"\nrole="generic"\n', 'cfg_get host_id') == "eval-host"
+    assert cfg('host_id = "relay_b"\nrole="generic"\n', 'cfg_get host_id') == "relay_b"
 
 
 def test_scalar_bare_with_comment():

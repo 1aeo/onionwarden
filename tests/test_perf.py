@@ -75,7 +75,7 @@ def test_network_deep_relay_scale(relay_proc, tmp_path):
     """network_deep collects 5000 connections / 200 tor instances within
     budget (30 s; test fails >60 s) and is O(conns+pids), not O(N^2)."""
     conf = tmp_path / "host.conf"
-    conf.write_text('host_id = "relay-a"\nrole = "tor-relay"\n')
+    conf.write_text('host_id = "relay_a"\nrole = "tor-relay"\n')
     env = {**os.environ, "ONIONWARDEN_ROOT": str(ROOT), "ONIONWARDEN_PROC": relay_proc}
     t0 = time.monotonic()
     p = subprocess.run(

@@ -6,7 +6,7 @@
 # depth, installs the append handler, and prints the restricted authorized_keys
 # line each monitored host's outbound key must be added under.
 #
-# Usage: receiver-setup.sh --hosts "relay-a eval-host ..." [--root DIR] [--pubkey FILE]
+# Usage: receiver-setup.sh --hosts "relay-a relay-b ..." [--root DIR] [--pubkey FILE]
 set -euo pipefail
 
 SRC_DIR=$(cd "$(dirname "$0")" && pwd)

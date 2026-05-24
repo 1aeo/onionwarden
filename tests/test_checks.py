@@ -138,8 +138,8 @@ def test_binding_loopback_token_wildcard_is_crit():
     assert b and b[0]["severity"] == "CRIT"
 
 
-def test_binding_relay-a_cursor_loopback_clean_no_finding():
-    """Mirrors relay-a's Cursor remote-dev state: node bound to 127.0.0.1
+def test_binding_relay_a_cursor_loopback_clean_no_finding():
+    """Mirrors relay_a's Cursor remote-dev state: node bound to 127.0.0.1
     on the ports declared with `loopback` constraint. No finding."""
     cfg = (GENERIC
            + 'expected_listen_binding_35425_tcp = "loopback"\n'
@@ -152,14 +152,14 @@ def test_binding_relay-a_cursor_loopback_clean_no_finding():
 
 def test_binding_local_token_match():
     cfg = GENERIC + 'expected_listen_binding_443_tcp = "local"\n'
-    f = run_analyze("ports", ["listener tcp 198.51.100.1.42 443 tor"],
-                    ["listener tcp 198.51.100.1.42 443 tor"], cfg)
+    f = run_analyze("ports", ["listener tcp 198.51.100.42 443 tor"],
+                    ["listener tcp 198.51.100.42 443 tor"], cfg)
     assert _binding_findings(f) == []
 
 
 def test_binding_local_token_wildcard_is_crit():
     """`local` (specific-IP) expectation regressed to wildcard — CRIT (tor
-    relay on 198.51.100.1.x:443 leaking to 0.0.0.0:443 widens exposure beyond the
+    relay on 198.51.100.x:443 leaking to 0.0.0.0:443 widens exposure beyond the
     operator's per-IP bind plan)."""
     cfg = GENERIC + 'expected_listen_binding_443_tcp = "local"\n'
     f = run_analyze("ports", ["listener tcp 0.0.0.0 443 tor"],
@@ -230,27 +230,27 @@ def test_binding_per_protocol_tcp_vs_udp_independent():
     assert _binding_findings(f) and _binding_findings(f)[0]["severity"] == "CRIT"
 
 
-def test_binding_relay-a_bgp_current_state_no_finding():
-    """Mirrors relay-a's post-rebind state: sshd on per-host port <SSH_PORT>,
-    bgpd on 203.0.113.50:179, 192 tor instances on 198.51.100.1.x:443, Cursor
+def test_binding_relay_a_bgp_current_state_no_finding():
+    """Mirrors relay_a's post-rebind state: sshd on per-host port 32022,
+    bgpd on 203.0.113.50:179, 192 tor instances on 198.51.100.x:443, Cursor
     on loopback. Whole-host quiet — no listener_binding findings."""
     cfg = (GENERIC
-           + "expected_lan_ports = [<SSH_PORT>, 179, 443]\n"
+           + "expected_lan_ports = [32022, 179, 443]\n"
            + 'expected_listen_binding_179_tcp   = "203.0.113.50"\n'
-           + 'expected_listen_binding_<SSH_PORT>_tcp = "any"\n'
+           + 'expected_listen_binding_32022_tcp = "any"\n'
            + 'expected_listen_binding_443_tcp   = "local"\n'
            + 'expected_listen_binding_35425_tcp = "loopback"\n')
-    cur = ["listener tcp 203.0.113.50 <SSH_PORT> sshd",
+    cur = ["listener tcp 203.0.113.50 32022 sshd",
            "listener tcp 203.0.113.50 179 bgpd",
-           "listener tcp 198.51.100.1.1 443 tor",
-           "listener tcp 198.51.100.1.99 443 tor",
+           "listener tcp 198.51.100.1 443 tor",
+           "listener tcp 198.51.100.99 443 tor",
            "listener tcp 127.0.0.1 35425 node",
            "listener tcp 127.0.0.1 5353 systemd-resolve"]
     f = run_analyze("ports", cur, cur, cfg)
     assert _binding_findings(f) == []
 
 
-def test_binding_relay-a_bgp_regression_is_crit():
+def test_binding_relay_a_bgp_regression_is_crit():
     """Synthetic regression: bgpd back on 0.0.0.0:179 — must page."""
     cfg = (GENERIC
            + "expected_lan_ports = [22, 179, 443]\n"

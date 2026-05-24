@@ -37,7 +37,7 @@ def test_install_into_scratch_tree(tmp_path):
 
     # host.conf generated from the answers file
     host_conf = (confdir / "host.conf").read_text()
-    assert 'host_id            = "relay-a"' in host_conf
+    assert 'host_id            = "relay_a"' in host_conf
 
     # C2: the pubkey-hash pin is embedded into the installed verify.sh
     want = hashlib.sha256(pub.read_bytes()).hexdigest()

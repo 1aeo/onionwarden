@@ -1,0 +1,9 @@
+# receiver.pub — placeholder
+#
+# This repo does NOT ship a real receiver public key. Generate your own on
+# the receiver host with `scripts/generate-receiver-key.sh`, then copy the
+# resulting `receiver.pub` into this directory and commit it to YOUR fork
+# (do NOT commit `receiver.priv`).
+#
+# See receiver/MIGRATION_TO_PROXMOX.md §"key custody" for the full rotation
+# procedure.

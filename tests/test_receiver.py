@@ -52,9 +52,9 @@ def _ev(seq, host, kind="finding", sev="INFO", detail=None):
 
 
 def test_append_routes_by_host(tmp_path):
-    _append(tmp_path, [_ev(1, "relay-a"), _ev(1, "eval-host")])
-    assert (tmp_path / "relay-a" / "events.log").exists()
-    assert (tmp_path / "eval-host" / "events.log").exists()
+    _append(tmp_path, [_ev(1, "relay_a"), _ev(1, "relay_b")])
+    assert (tmp_path / "relay_a" / "events.log").exists()
+    assert (tmp_path / "relay_b" / "events.log").exists()
 
 
 def test_append_sanitises_malicious_host_id(tmp_path):
@@ -66,20 +66,20 @@ def test_append_sanitises_malicious_host_id(tmp_path):
 
 
 def test_append_rate_limit(tmp_path):
-    lines = [_ev(i, "relay-a") for i in range(1, 21)]
+    lines = [_ev(i, "relay_a") for i in range(1, 21)]
     _append(tmp_path, lines, env_extra={"ONIONWARDEN_APPEND_RATE_MAX": "5"})
-    kept = open(tmp_path / "relay-a" / "events.log").read().splitlines()
+    kept = open(tmp_path / "relay_a" / "events.log").read().splitlines()
     assert len(kept) == 5  # only RATE_MAX lines kept
 
 
 def test_append_rejects_non_json(tmp_path):
-    _append(tmp_path, ["this is not json", _ev(1, "relay-a")])
-    kept = open(tmp_path / "relay-a" / "events.log").read().splitlines()
+    _append(tmp_path, ["this is not json", _ev(1, "relay_a")])
+    kept = open(tmp_path / "relay_a" / "events.log").read().splitlines()
     assert len(kept) == 1
 
 
 def test_verify_record_and_check_ok(tmp_path):
-    _append(tmp_path, [_ev(1, "relay-a", "selfreport", "INFO",
+    _append(tmp_path, [_ev(1, "relay_a", "selfreport", "INFO",
                            {"selfhash": "aaa", "pubkeyhash": "ppp"})])
     assert _receiver(tmp_path, "verify-record").returncode == 0
     r = _receiver(tmp_path, "verify-check")
@@ -87,45 +87,45 @@ def test_verify_record_and_check_ok(tmp_path):
 
 
 def test_verify_check_detects_pubkey_swap(tmp_path):
-    _append(tmp_path, [_ev(1, "relay-a", "selfreport", "INFO",
+    _append(tmp_path, [_ev(1, "relay_a", "selfreport", "INFO",
                            {"selfhash": "aaa", "pubkeyhash": "ppp"})])
     _receiver(tmp_path, "verify-record")
-    _append(tmp_path, [_ev(2, "relay-a", "selfreport", "INFO",
+    _append(tmp_path, [_ev(2, "relay_a", "selfreport", "INFO",
                            {"selfhash": "aaa", "pubkeyhash": "EVIL"})])
     r = _receiver(tmp_path, "verify-check")
     assert r.returncode == 2 and "MISMATCH" in r.stdout
 
 
 def test_seqcheck_detects_gap(tmp_path):
-    _append(tmp_path, [_ev(1, "relay-a"), _ev(2, "relay-a"),
-                       _ev(4, "relay-a")])  # seq 3 missing
+    _append(tmp_path, [_ev(1, "relay_a"), _ev(2, "relay_a"),
+                       _ev(4, "relay_a")])  # seq 3 missing
     r = _receiver(tmp_path, "seqcheck")
     assert r.returncode == 2 and "gap" in r.stdout.lower()
 
 
 def test_seqcheck_clean(tmp_path):
-    _append(tmp_path, [_ev(1, "relay-a"), _ev(2, "relay-a"),
-                       _ev(3, "relay-a")])
+    _append(tmp_path, [_ev(1, "relay_a"), _ev(2, "relay_a"),
+                       _ev(3, "relay_a")])
     r = _receiver(tmp_path, "seqcheck")
     assert r.returncode == 0
 
 
 def test_digest_rolls_up(tmp_path):
-    _append(tmp_path, [_ev(1, "relay-a", "finding", "CRIT")])
+    _append(tmp_path, [_ev(1, "relay_a", "finding", "CRIT")])
     r = _receiver(tmp_path, "digest")
-    assert r.returncode == 0 and "relay-a" in r.stdout
+    assert r.returncode == 0 and "relay_a" in r.stdout
 
 
 def test_verify_check_uses_highest_seq_not_file_order(tmp_path):  # R8-1
     """A replayed lower-seq good selfreport appended AFTER a bad one must not
     mask the mismatch — latest is selected by seq, not file order."""
-    _append(tmp_path, [_ev(1, "relay-a", "selfreport", "INFO",
+    _append(tmp_path, [_ev(1, "relay_a", "selfreport", "INFO",
                            {"selfhash": "good", "pubkeyhash": "good"})])
     _receiver(tmp_path, "verify-record")
     _append(tmp_path, [
-        _ev(3, "relay-a", "selfreport", "INFO",
+        _ev(3, "relay_a", "selfreport", "INFO",
             {"selfhash": "BAD", "pubkeyhash": "good"}),
-        _ev(1, "relay-a", "selfreport", "INFO",      # replay, lower seq, last
+        _ev(1, "relay_a", "selfreport", "INFO",      # replay, lower seq, last
             {"selfhash": "good", "pubkeyhash": "good"}),
     ])
     r = _receiver(tmp_path, "verify-check")

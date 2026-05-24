@@ -6,7 +6,7 @@
 # in before install. Example: the rollout canary `relay-a` (a tor-relay).
 
 # --- identity -------------------------------------------------------------
-host_id            = "relay-a"
+host_id            = "relay_a"
 role               = "tor-relay"          # selects roles/tor-relay.conf
 canary             = true                 # Q1 — the onionwarden rollout canary
 

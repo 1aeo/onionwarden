@@ -18,7 +18,7 @@ host's config, so changing it is a config edit, not code.
 **Risk:** low. `examples/answers-canary.example` is written for `relay-a`.
 
 ## §2 — Role assignments
-**Default:** the 8 relays → `tor-relay`, `eval-host` → `eval-host`.
+**Default:** the 8 relays → `tor-relay`, `relay-b` → `eval-host`.
 **Rationale:** kept the plan default (§8 Q14). `role` is a pluggable string →
 `roles/<role>.conf`; a new role needs no code change.
 **Risk:** low. Confirm each host's role in its answers file before install.
@@ -60,7 +60,7 @@ are secrets — a typo is caught at install (M9) and by the mandatory Phase-1
 dead-man self-test.
 
 ## §6 — Relay virtualization-type inventory  ⚠ HIGH-RISK
-**Default:** **deferred — Appendix A inventoried `eval-host` only.**
+**Default:** **deferred — Appendix A inventoried `relay-b` only.**
 **Rationale:** the 8 relays' VM-vs-bare-metal status was never inventoried; it
 drives (a) the offline trust-establishment method (§5 — disk-snapshot scan vs
 IPMI/live-USB) and (b) whether `chattr +i` works (FS-dependent — `install.sh`
