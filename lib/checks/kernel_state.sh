@@ -73,11 +73,16 @@ kernel_state_collect() {
     printf 'na container\n'
     return 0
   fi
-  # eBPF programs grouped by type.
+  # eBPF programs grouped by type. `bpftool prog show` requires CAP_SYS_ADMIN
+  # and exits non-zero under an unprivileged caller (e.g. CI / non-root host
+  # runs). With `set -o pipefail` that non-zero status propagates out of the
+  # command substitution and would trip `set -e` even though stderr was
+  # silenced — so we explicitly `|| true` the pipeline. Same trick as line
+  # below for the per-type count.
   if command -v bpftool >/dev/null 2>&1; then
     local types t n
-    types=$(bpftool prog show 2>/dev/null | sed -n 's/.*[0-9]*: \([a-z_]*\) .*/\1/p' \
-            | sort -u)
+    types=$(bpftool prog show 2>/dev/null \
+            | sed -n 's/.*[0-9]*: \([a-z_]*\) .*/\1/p' | sort -u || true)
     if [ -z "$types" ]; then
       printf 'bpf none 0\n'
     else
