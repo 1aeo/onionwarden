@@ -166,3 +166,16 @@ Ten self-critique rounds folded 30+ fixes back in. Two items are documented
   migrated separately as a one-off. The project has never shipped under the
   `secwatch` name to external users, so no rename-in-place tooling lives in
   this repo.
+- **`receiver/MIGRATION_TO_PROXMOX.md` removed.** That document was a
+  one-time internal runbook for the staging-VM → public-Proxmox cutover of
+  the operator's own receiver. No external user has that migration to do
+  (no one else stood up a `secwatch`-era receiver on a staging VM), so the
+  doc was deleted to avoid implying it's a required part of the install
+  flow. The one section worth keeping for any operator — the 4-step
+  dual-pin signing-key rotation protocol — was moved into
+  `receiver/RECEIVER.md` §"Rotating the signing key". Generic host-migration
+  steps (snapshot → rsync → re-arm `+a` → cut over → decommission) remain
+  in `RECEIVER.md` §"Migrating the receiver to a new host". The
+  Proxmox-specific bits (`ssh.socket.d/listen.conf`, ufw narrowing,
+  snapshot timing) were intentionally not preserved — they're either
+  provider docs or live operator notes, not project documentation.

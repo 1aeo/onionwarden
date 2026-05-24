@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/rotate-receiver-key.sh — rotate the receiver Ed25519 keypair safely.
 #
-# Step 1 of the 4-step rotation protocol (see MIGRATION_TO_PROXMOX.md
-# §"Rotate the receiver signing key").
+# Step 1 of the 4-step rotation protocol (see receiver/RECEIVER.md
+# §"Rotating the signing key").
 #
 # Procedure:
 #   1. verify the existing pair matches (refuse to rotate a broken pair)
