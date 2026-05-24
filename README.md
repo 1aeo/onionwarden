@@ -69,14 +69,21 @@ cp .env.example .env                       # fill in receiver host, ntfy, etc.
 # 2. generate the fleet signing keypair (once, store priv offline):
 python3 lib/ed25519.py keygen onionwarden.priv onionwarden.pub
 
-# 3. stand up the receiver (on a separate, off-fleet box):
+# 3. stand up the receiver (on a separate, off-fleet box).
+#    Full operator runbook in receiver/RECEIVER.md.
 ssh receiver-host
-git clone git@github.com:<you>/onionwarden.git
-bash onionwarden/scripts/generate-receiver-key.sh
-bash onionwarden/receiver/receiver-setup.sh --hosts "relay_a relay_b ..."
+sudo useradd -r -m -d /var/lib/onionwarden -s /bin/bash onionwarden
+sudo git clone https://github.com/<you>/onionwarden.git /opt/onionwarden
+sudo /opt/onionwarden/scripts/generate-receiver-key.sh
+sudo -u onionwarden ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden/data \
+    /opt/onionwarden/receiver/receiver-setup.sh \
+    --hosts "relay_a relay_b ..."
+# add the cron entries from receiver/RECEIVER.md and per-host
+# authorized_keys lines (each pinned to its host_id; see R1 in
+# CRITIQUE_RECEIVER_R1.md for the stolen-key threat that pin defends).
 
 # 4. on each monitored host:
-git clone git@github.com:<you>/onionwarden.git
+git clone https://github.com/<you>/onionwarden.git
 cp onionwarden.pub onionwarden/
 # edit a per-host answers file (see examples/answers-canary.example)
 sudo bash onionwarden/install.sh \
