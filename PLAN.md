@@ -6,11 +6,11 @@ Execution checklist — work top-to-bottom; check items off as they ship. Each i
 
 ### Operator decisions — needed before / during Phase 0
 - [x] Confirm `relay-a` as the default rollout canary (§8 Q1) (default kept — OPERATOR_DECISIONS.md §1)
-- [x] Confirm role assignments — 8 relays `tor-relay`, `eval-host` `eval-host` (§8 Q14) (default kept — OPERATOR_DECISIONS.md §2)
+- [x] Confirm role assignments — 8 relays `tor-relay`, `relay-b` `eval-host` (§8 Q14) (default kept — OPERATOR_DECISIONS.md §2)
 - [x] Choose & provision the off-box **receiver host** — always-on, off-fleet (§4, §8 Q2) (deferred-input — OPERATOR_DECISIONS.md §3, **HIGH-RISK flag**)
 - [x] Decide **signing-key custody** — offline machine or hardware token (§5, §8 Q5) (operator encrypted-laptop store — OPERATOR_DECISIONS.md §4)
 - [x] Pick `ntfy_url` (ntfy.sh vs self-hosted) and `deadman_provider` + `deadman_url` (§4, §8 Q3/Q4) (Healthchecks.io + ntfy.sh — OPERATOR_DECISIONS.md §5)
-- [x] Inventory the 8 relays' **virtualization type** (VM vs bare metal) — Appendix A is eval-host-only (§5, H7) (deferred to Phase-0 inventory — OPERATOR_DECISIONS.md §6, **HIGH-RISK flag**)
+- [x] Inventory the 8 relays' **virtualization type** (VM vs bare metal) — Appendix A is relay-b-only (§5, H7) (deferred to Phase-0 inventory — OPERATOR_DECISIONS.md §6, **HIGH-RISK flag**)
 - [x] Decide the **sustainable offline-scan cadence**; if not monthly, downgrade the §1 backstop-(c) claim (§1, §5, H7) (quarterly — OPERATOR_DECISIONS.md §7)
 - [x] Decide per-host `fatal_action` policy — relays use `alert`/`poweroff`, never `freeze` (§3.7, H6) (all hosts `alert` initially — OPERATOR_DECISIONS.md §8)
 - [x] Set per-host `physical_access_allowed` (default `false`); confirm any permanently-attached IPMI/KVM USB keyboard is captured at baseline so it doesn't trip fatal #10 (§2.8, §8) (`false` fleet-wide — OPERATOR_DECISIONS.md §9)
@@ -72,7 +72,7 @@ Execution checklist — work top-to-bottom; check items off as they ship. Each i
 
 **Status:** PLAN ONLY. Nothing has been installed or changed on any host. Review before any build.
 **Goal:** a portable, watchdog-style tamper-monitoring tool deployable to **any Ubuntu 24.04 host** — bare metal, KVM/QEMU guest, or cloud VM — that periodically checks tamper indicators and raises off-box alerts.
-**Design rule:** one repo, identical code everywhere. Each host differs only by (a) a small human-edited per-host config file and (b) a per-host baseline captured at bootstrap. `eval-host` (the shadow-judge eval host) is **one deployment target, not the design center** — see Appendix A. The current rollout fleet is listed in §0.5.
+**Design rule:** one repo, identical code everywhere. Each host differs only by (a) a small human-edited per-host config file and (b) a per-host baseline captured at bootstrap. `relay-b` (the shadow-judge eval host) is **one deployment target, not the design center** — see Appendix A. The current rollout fleet is listed in §0.5.
 **Author run date:** 2026-05-20.
 **Critique pass:** CRITIQUE.md (2026-05-21) — all CRITICAL + HIGH findings folded in; see §8 and inline `C#`/`H#`/`M#`/`L#` citations.
 
@@ -126,22 +126,22 @@ The in-scope fleet — 10 hosts, 9 monitored, 1 out of scope:
 
 | Host | OS | Kernel | Role | Tier |
 |---|---|---|---|---|
-| eval-host | Ubuntu 24.04 (KVM guest, legacy BIOS) | 6.17 generic | `eval-host` | 1 |
+| relay-b | Ubuntu 24.04 (KVM guest, legacy BIOS) | 6.17 generic | `eval-host` | 1 |
 | relay-d | Ubuntu 24.04 | 6.8 stock | `tor-relay` | 1 |
 | relay-e | Ubuntu 24.04 | 6.8 stock | `tor-relay` | 1 |
 | relay-a | Ubuntu 24.04 | 6.8 stock | `tor-relay` | 1 |
 | relay-f | Ubuntu 24.04 | OEM (6.14/6.17) | `tor-relay` | 1 |
 | relay-g | Ubuntu 24.04 | OEM (6.14/6.17) | `tor-relay` | 1 |
 | relay-h | Ubuntu 24.04 | OEM (6.14/6.17) | `tor-relay` | 1 |
-| relay-b | Debian 13 (trixie) | 6.12+deb13 | `tor-relay` | 2 (see below) |
-| relay-c | Debian 13 (trixie) | 6.12+deb13 | `tor-relay` | 2 |
+| relay-c | Debian 13 (trixie) | 6.12+deb13 | `tor-relay` | 2 (see below) |
+| relay-d | Debian 13 (trixie) | 6.12+deb13 | `tor-relay` | 2 |
 | freebsd-relay | FreeBSD 15 | — | — | **out of scope** |
 
-(Role assignments assume the 8 relays are `tor-relay` and `eval-host` is `eval-host` — confirm, Q14.)
+(Role assignments assume the 8 relays are `tor-relay` and `relay-b` is `eval-host` — confirm, Q14.)
 
 **Kernel-flavor handling.** Stock (`linux-image-generic`), HWE, and OEM (`linux-image-oem-24.04*`) kernels need no special-casing: `/boot` hashes and the module set are per-host captured baselines, and the running-vs-installed check compares `uname -r` against the highest-versioned installed `linux-image-*` package of *any* flavor. No code branches per kernel.
 
-**Debian 13 — recommendation: SUPPORT it (tier-2), do not skip.** Debian 13 (trixie) is the same systemd + apt + dpkg world `onionwarden` already targets — `systemd` timers, `journalctl`, `dpkg --verify`/`debsums`, `/var/log/apt/history.log`, `ss`, `ip`, `nft`, AIDE, `auditd` all present and behaving identically. The only Ubuntu-specific logic in the plan is OEM-kernel meta-package naming and a few Ubuntu-isms (`ubuntu-advantage`, `update-notifier`); these are already isolated behind capability/`os_id` probes and simply log `N/A` on Debian. Incremental cost of covering `relay-b`/`relay-c`: one `os_id` branch plus a validation pass on one Debian host. Skipping them would leave 2 of 9 monitored hosts dark for no architectural saving. **Decision: Ubuntu 24.04 = tier-1 (primary, fully tested); Debian 13 = tier-2 (officially supported, validated on one host before fleet rollout).** Detect-and-skip means one codebase, not two.
+**Debian 13 — recommendation: SUPPORT it (tier-2), do not skip.** Debian 13 (trixie) is the same systemd + apt + dpkg world `onionwarden` already targets — `systemd` timers, `journalctl`, `dpkg --verify`/`debsums`, `/var/log/apt/history.log`, `ss`, `ip`, `nft`, AIDE, `auditd` all present and behaving identically. The only Ubuntu-specific logic in the plan is OEM-kernel meta-package naming and a few Ubuntu-isms (`ubuntu-advantage`, `update-notifier`); these are already isolated behind capability/`os_id` probes and simply log `N/A` on Debian. Incremental cost of covering `relay-c`/`relay-d`: one `os_id` branch plus a validation pass on one Debian host. Skipping them would leave 2 of 9 monitored hosts dark for no architectural saving. **Decision: Ubuntu 24.04 = tier-1 (primary, fully tested); Debian 13 = tier-2 (officially supported, validated on one host before fleet rollout).** Detect-and-skip means one codebase, not two.
 
 **FreeBSD 15 (`freebsd-relay`) — out of scope, confirmed.** No systemd, no apt/dpkg, different `/proc`, different `ss`/`ip`/`procstat`. Supporting it would be a separate tool, not a branch. If `freebsd-relay` needs tamper monitoring, treat it as a distinct workstream.
 
@@ -172,7 +172,7 @@ What a role profile tunes (examples):
 ## 1. Threat model & assumptions
 
 ### Assets
-1. **Integrity of whatever the host is responsible for** — an eval/CI pipeline, production services, served model endpoints. Silent tampering that biases outputs is worse than an outage, because bad output is trusted and acted on. *(On `eval-host` this is the shadow-judge eval results — see Appendix A.)*
+1. **Integrity of whatever the host is responsible for** — an eval/CI pipeline, production services, served model endpoints. Silent tampering that biases outputs is worse than an outage, because bad output is trusted and acted on. *(On `relay-b` this is the shadow-judge eval results — see Appendix A.)*
 2. **The host itself and its credentials** — admin SSH keys, sudo, the host's standing on its LAN.
 3. **Workloads the host runs** — services, containers, or nested VMs.
 
@@ -386,7 +386,7 @@ A remote-managed fleet: nobody should be at the keyboard under normal operation,
 The **only** human-edited per-host file. `role` selects a role profile (§0.6) loaded *before* this file; `host.conf` overrides the profile. All endpoints are runtime-configurable — nothing is hardcoded. Annotated example (an eval host):
 ```ini
 # Identity
-host_id            = "eval-host"
+host_id            = "relay-b"
 role               = "eval-host"            # selects roles/eval-host.conf; also alert context
 canary             = false                  # Q1 — true ONLY on the onionwarden rollout-canary host (§6 Phase 1)
 
@@ -394,7 +394,7 @@ canary             = false                  # Q1 — true ONLY on the onionwarde
 ntfy_url           = "https://ntfy.example.net/onionwarden"   # ntfy.sh or self-hosted; tradeoffs in §4
 deadman_provider   = "healthchecks-saas"     # healthchecks-saas | healthchecks-selfhost | http-ping
 deadman_url        = "https://hc-ping.com/UUID-PER-HOST"
-offbox_log_target  = "receiver-host:~/onionwarden/eval-host/events.log"
+offbox_log_target  = "receiver-host:~/onionwarden/relay-b/events.log"
 email_to           = "alerts@example.net"
 alert_push_level   = "crit"                  # crit = only CRIT pushes; warn = push everything (Q11)
 
@@ -483,7 +483,7 @@ The operator never runs `chattr` directly. If `onionwarden-upgrade` is interrupt
 - **Backup tools.** *Reading*/copying `+i` files for backup is unaffected. The failure mode is on the *write* side: a tool that **restores onto** a protected path, or that updates mtime/atime on an existing `+i` file (`rsync --times`, `tar -x` over it, `touch`), fails with `EPERM`. A same-host restore of the watchdog must `chattr -i` first (or go through `onionwarden-upgrade`) — note this in any backup runbook.
 - **Filesystem support.** `+i` works identically on **ext4, btrfs, and xfs**. It is **not** supported on tmpfs, ZFS (which has its own `zfs set immutable`), overlayfs, or most network filesystems. `install.sh` probes the filesystem of the install prefix (§0.2); on an unsupported FS the feature **no-ops with a logged `N/A: immutable unsupported on <fs>`** and the host falls back to detection-only — consistent with detect-and-skip.
 
-**Debian 13 (`relay-b` / `relay-c`).** `chattr +i` behaves identically on Debian 13 — same kernel inode-flag interface, same `e2fsprogs` `chattr`/`lsattr`. The only dependency is the *filesystem*, not the distro: Debian 13's installer defaults to **ext4** (fully supported); btrfs/xfs are also fine. *Caveat:* the actual root filesystem of `relay-b`/`relay-c` was **not** inventoried — the authorized read-only inventory covered only `eval-host` — so `install.sh`'s FS probe confirms it automatically at install time; a non-ext4/btrfs/xfs root degrades gracefully rather than breaking.
+**Debian 13 (`relay-c` / `relay-d`).** `chattr +i` behaves identically on Debian 13 — same kernel inode-flag interface, same `e2fsprogs` `chattr`/`lsattr`. The only dependency is the *filesystem*, not the distro: Debian 13's installer defaults to **ext4** (fully supported); btrfs/xfs are also fine. *Caveat:* the actual root filesystem of `relay-c`/`relay-d` was **not** inventoried — the authorized read-only inventory covered only `relay-b` — so `install.sh`'s FS probe confirms it automatically at install time; a non-ext4/btrfs/xfs root degrades gracefully rather than breaking.
 
 ### 3.7 Fatal-action kill-switch — `fatal_action`, ships disarmed
 
@@ -520,7 +520,7 @@ The list is **extensible per role** — `roles/<role>.conf` adds entries (e.g. `
 
 **Flap protection.** A `poweroff`/`freeze` is recorded in `/var/lib/onionwarden/state/`. After a reboot, if the same finding recurs within `fatal_cooldown_hours` the action is **suppressed** (still logged + pushed, no second action) — otherwise reboot → same finding → poweroff would loop the host into the ground. Re-arming after a cooldown-suppressed event requires explicit `onionwarden arm-fatal`.
 
-**Recovery — out-of-band only, by design.** After a `poweroff` the host returns **only** via console / OOB management: hypervisor `virsh start` for a VM (e.g. `eval-host`), IPMI/iDRAC/physical for bare metal. The watchdog deliberately exposes **no remote power-on or remote-unfreeze path** — such a channel would be a remote-controllable shutoff oracle for an attacker. Operational consequence: **do not arm `poweroff` on a host without OOB access** — and note (H6) `freeze` is not a safe fallback on relays. A `poweroff` also stops the heartbeat, so the dead-man's switch (§4) fires too — an expected second, independent record.
+**Recovery — out-of-band only, by design.** After a `poweroff` the host returns **only** via console / OOB management: hypervisor `virsh start` for a VM (e.g. `relay-b`), IPMI/iDRAC/physical for bare metal. The watchdog deliberately exposes **no remote power-on or remote-unfreeze path** — such a channel would be a remote-controllable shutoff oracle for an attacker. Operational consequence: **do not arm `poweroff` on a host without OOB access** — and note (H6) `freeze` is not a safe fallback on relays. A `poweroff` also stops the heartbeat, so the dead-man's switch (§4) fires too — an expected second, independent record.
 
 **Recovery runbook specifics (M10).** `onionwarden-fatal` **snapshots the pre-freeze nftables ruleset** before installing the freeze ruleset; recovery restores that snapshot surgically and does **not** blanket-`nft flush` (which would also drop the Phase-4 host firewall). After a `poweroff`: **remediate offline before re-powering** — flap-protection means a rebooted-still-compromised host runs armed-but-inert for `fatal_cooldown_hours`, and a host that legitimately tripped `poweroff` cannot re-arm until checklist item 1's 7-quiet-day window passes. Both are intended; documented here so neither is a surprise during an incident.
 
@@ -626,7 +626,7 @@ You can only baseline cleanly from a known-good state. The `onionwarden-baseline
 
 Then: `onionwarden-baseline collect` → **manually review every artifact** (module list, listeners, SUID set, `sshd -T`, keys) → sign off-box → store on receiver + push to host → record creation in `events.log`. **Re-run the strongest available out-of-band scan periodically** as ground truth — backstop (c) from §1.
 
-**Cost caveat (H7).** For the 8 internet-facing relays one scan cycle means 8 disk-snapshot-mount scans (if VMs) or 8 physical / IPMI sessions (if bare metal) — and the relays' virtualization type has **not** been inventoried (Appendix A is eval-host-only; inventorying it is a Phase-0 task). Pick a cadence the operator will *actually* sustain; if monthly is unrealistic, say so and downgrade §1's backstop-(c) claim to the real cadence rather than an aspirational one. A trust anchor that does not happen is not a trust anchor.
+**Cost caveat (H7).** For the 8 internet-facing relays one scan cycle means 8 disk-snapshot-mount scans (if VMs) or 8 physical / IPMI sessions (if bare metal) — and the relays' virtualization type has **not** been inventoried (Appendix A is relay-b-only; inventorying it is a Phase-0 task). Pick a cadence the operator will *actually* sustain; if monthly is unrealistic, say so and downgrade §1's backstop-(c) claim to the real cadence rather than an aspirational one. A trust anchor that does not happen is not a trust anchor.
 
 ### Log retention & review
 - **On-box:** JSON to `/var/log/onionwarden/`; `logrotate` 30 days, total size-capped (default ~200 MB — important on space-constrained hosts).
@@ -669,7 +669,7 @@ An Ansible role wrapping the proven `install.sh` + `onionwarden-upgrade` flow �
 
 ## 7. Phase 1 quick-win — highest-value subset, ≈1 day, zero package installs
 
-All checks below are sub-second and need only coreutils / iproute2 / systemd / `curl`. `curl` is a documented prerequisite — present on stock Ubuntu/Debian and on eval-host; `install.sh` verifies it and installs it (or falls back to `wget` / bash `/dev/tcp`) if a minimal image lacks it (L3). Identical on every host; detect-and-skip handles capability gaps.
+All checks below are sub-second and need only coreutils / iproute2 / systemd / `curl`. `curl` is a documented prerequisite — present on stock Ubuntu/Debian and on relay-b; `install.sh` verifies it and installs it (or falls back to `wget` / bash `/dev/tcp`) if a minimal image lacks it (L3). Identical on every host; detect-and-skip handles capability gaps.
 
 | # | Check | Command | Catches |
 |---|---|---|---|
@@ -708,7 +708,7 @@ All 16 open questions were resolved by the operator on 2026-05-20 and folded int
 | 11 | Alert volume | `alert_push_level = warn\|crit`; default `crit`, canary `warn` (§3.4, §4). | RESOLVED |
 | 12 | Re-baseline & immutability | Manual-signed AND `--after-apt` both available. `immutable_scripts` (chattr +i on watchdog code/units/config/pubkey) **default ON**, configurable off; legitimate updates go through `onionwarden-upgrade` — no manual `chattr` (§3.6). | RESOLVED |
 | 13 | Retention | `offbox_log_retention`, default 365d (§3.4, §5). | RESOLVED |
-| 14 | Role assignments | 8 relays `tor-relay`, `eval-host` `eval-host`; `role` is a pluggable string → `roles/<role>.conf`, new roles need no code change (§0.6). | RESOLVED pending operator confirmation (L1) |
+| 14 | Role assignments | 8 relays `tor-relay`, `relay-b` `eval-host`; `role` is a pluggable string → `roles/<role>.conf`, new roles need no code change (§0.6). | RESOLVED pending operator confirmation (L1) |
 | 15 | Debian 13 | In scope, tier-2 (§0.5). | RESOLVED |
 | 16 | Tor binary | Stock package on all relays → `debsums tor` is the primary tor-binary integrity check (§0.6, §6). | RESOLVED |
 
@@ -738,22 +738,22 @@ Resolved from earlier rounds:
 
 ---
 
-## Appendix A — Reference inventory: `eval-host` (one example target)
+## Appendix A — Reference inventory: `relay-b` (one example target)
 
 The following is a read-only inventory of **one** deployment target, captured 2026-05-20. It is included to show *how detect-and-skip resolves on a real host* — it is **not** the design center, and no other host should be assumed to look like this.
 
-| Property | Observed on eval-host | How the portable tool handles it |
+| Property | Observed on relay-b | How the portable tool handles it |
 |---|---|---|
 | Virtualization | QEMU/KVM guest (i440FX, virtio, `vmgenid`) | `virt_type=kvm`; hypervisor is out of scope for this host. |
 | Firmware/boot | Legacy BIOS — `/sys/firmware/efi` absent, GRUB `i386-pc` | Secure Boot check → `N/A: legacy BIOS`. `/boot` hashing + GRUB password used instead. |
 | Kernel | `6.17.0-29-generic`, running == newest installed | Running-vs-installed check active. |
 | Taint | `/proc/sys/kernel/tainted` = `0` | Baseline = 0; any rise alerts. |
 | Lockdown | `[none]` | Phase 4 hardening candidate. |
-| Modules | 67 loaded (`kvm_amd`, `nf_tables`, libvirt `bridge`) | Captured into eval-host's baseline. |
+| Modules | 67 loaded (`kvm_amd`, `nf_tables`, libvirt `bridge`) | Captured into relay-b's baseline. |
 | Users | One human: `operator` (uid 1000, `sudo`), 2 SSH keys; `/etc/sudoers.d` clean | `expected_admins=["operator"]`, `expected_uid0=["root"]`. |
 | Listeners | SSH `:22`; `:3000` + `:18789` (node) bound `0.0.0.0`; rest `127.0.0.1` | `expected_lan_ports=[22,3000,18789]` after confirming intent (Q7). |
 | Firewall | `nft`/`iptables` present, host ruleset effectively empty | Monitored now; Phase 4 candidate. |
-| Nested VMs | `qemu-system-x86` processes running inside eval-host | `is_hypervisor=true`, `allow_virt_churn=true`. |
+| Nested VMs | `qemu-system-x86` processes running inside relay-b | `is_hypervisor=true`, `allow_virt_churn=true`. |
 | Security tooling | `aide`, `debsums`, `auditd`, `mokutil`, `rkhunter` absent; `bpftool`, `nft`, `iptables`, `curl` present | Phase 1 needs no installs; AIDE/debsums/auditd arrive Phase 2/3. |
 | Disk | `/` 88% full, ~18 GB free; unattended-upgrades enabled | Log size cap matters here; apt churn correlation matters here. |
 

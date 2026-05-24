@@ -1,14 +1,14 @@
-# answers-evalhost.example — per-host answers file for an eval-host (eval-host).
+# answers-evalhost.example — per-host answers file for an eval-host (relay-b).
 # See answers-canary.example for the full annotation of every field.
 
-host_id            = "eval-host"
+host_id            = "relay_b"
 role               = "eval-host"           # selects roles/eval-host.conf
 canary             = false
 
 ntfy_url           = "https://ntfy.sh/onionwarden-CHANGE-ME-unguessable-topic"
 deadman_provider   = "healthchecks-saas"
 deadman_url        = "https://hc-ping.com/CHANGE-ME-UUID-PER-HOST"
-offbox_log_target  = "onionwarden@receiver.example.net:~/onionwarden/eval-host/events.log"
+offbox_log_target  = "onionwarden@receiver.example.net:~/onionwarden/relay-b/events.log"
 offbox_ssh_key     = "/etc/onionwarden/keys/offbox_ed25519"
 email_to           = "alerts@example.net"
 alert_push_level   = "crit"
@@ -18,7 +18,7 @@ expected_uid0          = ["root"]
 expected_admins        = ["operator"]
 expected_extra_modules = []
 expected_taint_bits    = []
-allow_virt_churn       = true               # eval-host runs nested QEMU guests
+allow_virt_churn       = true               # relay-b runs nested QEMU guests
 physical_access_allowed = false
 
 workload_integrity_check = "none"           # live nested-VM disks churn (§2.4)

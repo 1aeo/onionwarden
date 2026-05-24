@@ -1,1 +1,30 @@
+# Fleet-specific config — never commit
+.env
+.env.local
+*.env
+hosts/*.conf
+hosts/*.local
+
+# Snapshots + dry-run artefacts
 snapshots/
+out/
+*.snapshot
+
+# Keys (public side may be committed deliberately as receiver/receiver.pub)
+keys/
+*.priv
+*.priv.pem
+receiver/receiver.priv
+receiver/receiver.pub.local
+
+# Python / editors
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/

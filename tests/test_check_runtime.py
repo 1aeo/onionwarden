@@ -3,7 +3,7 @@
 History: Debian 13's non-interactive `bash -s` PATH is
 `/usr/local/bin:/usr/bin:/bin:/usr/games` — no sbin dirs. That silently
 breaks `command -v` for sshd / nft / dmidecode / bpftool, and a check
-then emits a false `na no-<tool>`. We caught it on the first relay-c
+then emits a false `na no-<tool>`. We caught it on the first relay_d
 trial snapshot: `ssh` came back `sshd na no-sshd-binary` even though
 `/usr/sbin/sshd` was installed. These tests pin the runtime so the
 sbin gap can't silently bite the next Debian host.

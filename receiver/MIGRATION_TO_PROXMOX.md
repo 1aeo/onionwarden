@@ -1,6 +1,6 @@
 # MIGRATION_TO_PROXMOX.md
 
-Migrate the onionwarden off-box receiver from the staging VM (LAN <RECEIVER_IP>) to
+Migrate the onionwarden off-box receiver from the staging VM (LAN 192.0.2.176) to
 the eventual public-IP Proxmox host with a clean rsync + recreate sequence.
 
 This document describes the receiver **as actually deployed** — an SSH-forced-
@@ -13,11 +13,11 @@ is `receiver-append.sh` invoked by SSH ForceCommand.
 
 ```
 monitored host
-  └─ ssh -i host_key -p 49876 onionwarden@<receiver> <<< '<json event>'
+  └─ ssh -i host_key -p 32876 onionwarden@<receiver> <<< '<json event>'
         │     (publickey-only, restricted-command authorized_keys entry)
         ▼
 receiver
-  ├─ sshd (socket-activated; ListenStream=49876 only)
+  ├─ sshd (socket-activated; ListenStream=32876 only)
   ├─ /opt/onionwarden-receiver/append-shim.sh   ← forced command, sets env
   │      └─ exec /opt/onionwarden-receiver/receiver-append.sh
   │           └─ append line → /var/lib/onionwarden/data/<host>/events.log
@@ -28,7 +28,7 @@ receiver
 ```
 
 Two user accounts on the receiver:
-- `aeo1` — interactive admin (sudo). Key-only SSH. No password-auth.
+- `admin` — interactive admin (sudo). Key-only SSH. No password-auth.
 - `onionwarden` — system user (UID < 1000), `/bin/bash` shell, `/var/lib/onionwarden`
   home. Receives events over SSH via forced-command-only keys; never an
   interactive shell. Runs the cron jobs.
@@ -46,7 +46,7 @@ Concretely:
 | `onionwarden-receiver.service` systemd unit | `/etc/cron.d/onionwarden-receiver` | No daemon in upstream — only the three cron-driven scripts (`verify-check`, `seqcheck`, `digest`). |
 | `receiver.conf` JSON with `listen_port`/`listen_address`/etc. | Env vars (`ONIONWARDEN_RECEIVER_ROOT`, `ONIONWARDEN_RECEIVER_NTFY`) | The codebase reads two env vars; there is no JSON config. Settings live in `/etc/cron.d/onionwarden-receiver` and `/opt/onionwarden-receiver/append-shim.sh`. |
 | Receiver signing keypair signs every outgoing payload | Keypair generated at `/var/lib/onionwarden/receiver.{priv,pub}` (PEM) but no current code path consumes it | Upgrade path: kept ready so a future signing-of-digests change is drop-in (matches the `lib/ed25519.py` PEM format). |
-| `Port 49876` in `sshd_config` controls listening | Ubuntu 24.04 socket-activates sshd; the real listen port is in `/etc/systemd/system/ssh.socket.d/listen.conf` | sshd_config `Port` is ignored when `ssh.socket` is active. Both files are written to keep `sshd_config` self-documenting *and* the socket override correct. |
+| `Port 32876` in `sshd_config` controls listening | Ubuntu 24.04 socket-activates sshd; the real listen port is in `/etc/systemd/system/ssh.socket.d/listen.conf` | sshd_config `Port` is ignored when `ssh.socket` is active. Both files are written to keep `sshd_config` self-documenting *and* the socket override correct. |
 | `ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden` | `ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden/data` | The home dir gets polluted by snap-confined tools (`/var/lib/onionwarden/snap`, `.cache`, `.local`) which `host_dirs()` would otherwise treat as fake "hosts." `data/` is an isolated subdirectory. |
 | `chattr +a` on `events.log` for append-only defence in depth | Skipped — staging FS rejects it | `receiver-setup.sh` falls back silently. The primary append-only guarantee is the SSH forced command (it can `>>` but cannot `truncate` or `rm`). On a Proxmox host with ext4 + `user_xattr` it should succeed; re-run `receiver-setup.sh` post-migration and confirm. |
 
@@ -91,10 +91,10 @@ are the same but versions differ; the receiver code works on either.
 ## User-creation steps (cannot rsync — recreate on the new host)
 
 ```sh
-# aeo1 — interactive admin
-useradd -m -s /bin/bash -G sudo aeo1
+# admin — interactive admin
+useradd -m -s /bin/bash -G sudo admin
 NEW_PASS=$(python3 -c "import secrets,string; a=string.ascii_letters+string.digits+'-_.'; print(''.join(secrets.choice(a) for _ in range(40)))")
-echo "aeo1:${NEW_PASS}" | chpasswd
+echo "admin:${NEW_PASS}" | chpasswd
 echo "CAPTURE NEW AEO1 PASSWORD INTO PWMGR: ${NEW_PASS}"
 # (Don't carry the staging password — generate fresh.)
 
@@ -102,25 +102,25 @@ echo "CAPTURE NEW AEO1 PASSWORD INTO PWMGR: ${NEW_PASS}"
 useradd -r -m -d /var/lib/onionwarden -s /bin/bash onionwarden
 ```
 
-Then install your laptop SSH pubkey to `aeo1`:
+Then install your laptop SSH pubkey to `admin`:
 ```sh
-ssh-copy-id -i ~/.ssh/onionwarden_receiver.pub -p 22 operator@<new-host>
+ssh-copy-id -i ~/.ssh/onionwarden_receiver.pub -p 22 admin@<new-host>
 # (port 22 until you copy the ssh.socket override and reload)
 ```
 
 ## Config knobs that change for production
 
 1. **`/etc/systemd/system/ssh.socket.d/listen.conf` — `ListenStream`**
-   On staging this is `0.0.0.0:49876` (LAN). On the public Proxmox host, narrow
+   On staging this is `0.0.0.0:32876` (LAN). On the public Proxmox host, narrow
    to the specific public IP:
    ```
    [Socket]
    ListenStream=
-   ListenStream=<public-ip>:49876
+   ListenStream=<public-ip>:32876
    ```
    Then `systemctl daemon-reload && systemctl restart ssh.socket`.
 
-2. **`ufw allow 49876/tcp`** — same, but `ufw allow from <monitored-host-ip> to any port 49876` is tighter if the monitored fleet has known source IPs.
+2. **`ufw allow 32876/tcp`** — same, but `ufw allow from <monitored-host-ip> to any port 32876` is tighter if the monitored fleet has known source IPs.
 
 3. **`/etc/cron.d/onionwarden-receiver` — `ONIONWARDEN_RECEIVER_NTFY=`**
    On staging this is blank (no notification endpoint yet). In production fill
@@ -175,11 +175,11 @@ chmod 600 /var/lib/onionwarden/receiver.priv
        apt update
        apt install -y python3 openssh-server cron ufw
 
-3. Recreate users (see "User-creation steps" above). PRINT the new aeo1
+3. Recreate users (see "User-creation steps" above). PRINT the new admin
    password ONCE; do not log it.
 
-4. Install your laptop key on aeo1 (still on port 22 — bootstrap):
-       ssh-copy-id -i ~/.ssh/onionwarden_receiver.pub operator@<new-host>
+4. Install your laptop key on admin (still on port 22 — bootstrap):
+       ssh-copy-id -i ~/.ssh/onionwarden_receiver.pub admin@<new-host>
 
 5. rsync the deployment trees from staging (or from a clean source clone):
        rsync -aHx /opt/onionwarden-receiver/  root@<new>:/opt/onionwarden-receiver/
@@ -201,7 +201,7 @@ chmod 600 /var/lib/onionwarden/receiver.priv
 
 8. Set up ufw:
        ufw default deny incoming; ufw default allow outgoing
-       ufw allow 49876/tcp comment 'ssh (onionwarden)'
+       ufw allow 32876/tcp comment 'ssh (onionwarden)'
        ufw --force enable
 
 9. Optional: rotate receiver signing key (see "Rotate or keep"); commit the
@@ -229,9 +229,9 @@ chmod 600 /var/lib/onionwarden/receiver.priv
 
 After step 11, on the new host:
 
-- [ ] `ss -tln` shows only `<public-ip>:49876` (or 0.0.0.0:49876 if not narrowed)
-- [ ] `ufw status` shows only 49876/tcp ALLOW
-- [ ] `ssh -o PreferredAuthentications=password operator@<new-host>` → rejected
+- [ ] `ss -tln` shows only `<public-ip>:32876` (or 0.0.0.0:32876 if not narrowed)
+- [ ] `ufw status` shows only 32876/tcp ALLOW
+- [ ] `ssh -o PreferredAuthentications=password admin@<new-host>` → rejected
 - [ ] `systemctl is-active cron ssh.socket` → both active
 - [ ] `/opt/onionwarden-receiver/onionwarden-receiver verify-check` returns `ok` for every monitored host
 - [ ] `/opt/onionwarden-receiver/onionwarden-receiver digest` lists every monitored host with non-zero INFO count in the 24h window
