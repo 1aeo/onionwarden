@@ -77,7 +77,11 @@ sudo -u onionwarden ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden/data \
 # 5. install the cron schedule (as root):
 cat <<'EOF' > /etc/cron.d/onionwarden-receiver
 ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden/data
-ONIONWARDEN_RECEIVER_NTFY=https://ntfy.example.net/onionwarden
+# NOTE: Vixie cron (Ubuntu's 3.0pl1) rejects env-var lines with empty values
+# as "bad minute" — the parser falls through to cron-entry parsing and treats
+# the var name as the minute field, silently invalidating the whole file.
+# Emit commented out; uncomment + assign when ntfy is configured.
+# ONIONWARDEN_RECEIVER_NTFY=  # set to your ntfy URL when ntfy is configured
 */5 * * * *  onionwarden  /var/lib/onionwarden/data/.bin/onionwarden-receiver verify-check
 */5 * * * *  onionwarden  /var/lib/onionwarden/data/.bin/onionwarden-receiver seqcheck
 0 7 * * *    onionwarden  /var/lib/onionwarden/data/.bin/onionwarden-receiver digest
@@ -94,9 +98,12 @@ EOF
 2. **ufw allow** — `ufw allow <PORT>/tcp`; or tighter,
    `ufw allow from <monitored-host-ip> to any port <PORT>` if your
    monitored hosts have known source IPs.
-3. **ntfy endpoint** — set `ONIONWARDEN_RECEIVER_NTFY=` in the cron
-   environment. Blank = no notification push; verify-check / seqcheck
-   findings still print to cron's mail.
+3. **ntfy endpoint** — uncomment `# ONIONWARDEN_RECEIVER_NTFY=` in
+   `/etc/cron.d/onionwarden-receiver` and assign your ntfy URL. Left
+   commented = no notification push; verify-check / seqcheck findings
+   still print to cron's mail. Do NOT leave it uncommented-but-empty —
+   Vixie cron rejects empty env-var values; the heredoc above ships
+   commented out for exactly this reason.
 4. **Per-host authorized_keys entries** — append ONE line per monitored
    host to `/var/lib/onionwarden/.ssh/authorized_keys`. Each line MUST
    pin the host_id as the forced-command first arg so a stolen key

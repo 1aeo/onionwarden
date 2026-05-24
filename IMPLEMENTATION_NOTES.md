@@ -79,6 +79,17 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
 - **`filesystem.sh` watchdog-path hardcoding** — the immutable-bit fatal-#8
   watch hardcodes `/opt/onionwarden/...`; correct for a standard install, but a
   relocated install would not be watched. (Flagged in CRITIQUE_R2.)
+- **Vixie cron rejects empty-value env-var lines.** On Ubuntu 24.04 / Debian 13
+  the `cron` package is Vixie cron `3.0pl1-184ubuntu2`. An env-var line of the
+  form `FOO=` (assignment to empty value) is rejected with `Error: bad minute`
+  — the parser falls through to cron-entry parsing and treats the var name as
+  the minute field, silently invalidating the *entire* crontab file. As a
+  result, the cron-file heredoc in `receiver/RECEIVER.md` ships
+  `ONIONWARDEN_RECEIVER_NTFY` commented out by default; operators uncomment +
+  assign a value when ntfy is configured. A regression test
+  (`tests/test_receiver.py::test_receiver_md_cron_heredoc_has_no_empty_env_var`)
+  asserts no empty-value `ONIONWARDEN_*=` line is reintroduced. Diagnosed on
+  the 192.0.2.41 deploy 2026-05-24.
 
 ## Offline snapshot mode (Mode A dry-run)
 

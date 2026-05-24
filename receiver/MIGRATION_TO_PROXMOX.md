@@ -82,7 +82,7 @@ are the same but versions differ; the receiver code works on either.
 | `/var/lib/onionwarden/.ssh/authorized_keys` | same | Restricted per-host forced-command entries. Owned `onionwarden:onionwarden`, mode 0600. |
 | `/var/lib/onionwarden/receiver.priv` | same OR regenerate | Future-use signing key. See "Rotate or keep" below. |
 | `/var/lib/onionwarden/receiver.pub` | same OR regenerate | Public counterpart (also in this repo at `receiver/receiver.pub`). |
-| `/etc/cron.d/onionwarden-receiver` | same | Cron schedule. Edit the `ONIONWARDEN_RECEIVER_NTFY=` line if/when ntfy goes in. |
+| `/etc/cron.d/onionwarden-receiver` | same | Cron schedule. Uncomment the `# ONIONWARDEN_RECEIVER_NTFY=` line and assign your URL if/when ntfy goes in. Do not leave it uncommented-but-empty — Vixie cron rejects empty env-var values. |
 | `/etc/ssh/sshd_config.d/99-onionwarden-hardening.conf` | same | Keys-only, AllowUsers, MaxAuthTries, etc. |
 | `/etc/systemd/system/ssh.socket.d/listen.conf` | EDIT then copy | This is the **real** listen-port file. See "Config knobs" below. |
 | `/etc/ufw/user.rules`, `/etc/ufw/user6.rules` | re-create with `ufw allow` | rsyncing ufw state is brittle; cleaner to `ufw --force reset` then re-apply the rules. |
@@ -123,10 +123,13 @@ ssh-copy-id -i ~/.ssh/onionwarden_receiver.pub -p 22 admin@<new-host>
 2. **`ufw allow 32876/tcp`** — same, but `ufw allow from <monitored-host-ip> to any port 32876` is tighter if the monitored fleet has known source IPs.
 
 3. **`/etc/cron.d/onionwarden-receiver` — `ONIONWARDEN_RECEIVER_NTFY=`**
-   On staging this is blank (no notification endpoint yet). In production fill
-   in the real ntfy URL, e.g. `https://ntfy.example.com/onionwarden-fleet-CRIT`.
+   On staging this is commented out (no notification endpoint yet). In
+   production, uncomment and fill in the real ntfy URL, e.g.
+   `ONIONWARDEN_RECEIVER_NTFY=https://ntfy.example.com/onionwarden-fleet-CRIT`.
    The receiver only emits a notification on `verify-check` CRIT (mismatch or
-   stale events.log).
+   stale events.log). **Do NOT leave `ONIONWARDEN_RECEIVER_NTFY=` uncommented
+   with an empty value** — Vixie cron (Ubuntu's 3.0pl1) rejects empty env-var
+   values and silently ignores the entire crontab file.
 
 4. **Per-host SSH ForceCommand entries in `/var/lib/onionwarden/.ssh/authorized_keys`**
    The staging file has one entry for the `smoketest` synthetic host. In
