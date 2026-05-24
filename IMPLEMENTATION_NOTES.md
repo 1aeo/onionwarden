@@ -146,3 +146,12 @@ Ten self-critique rounds folded 30+ fixes back in. Two items are documented
   not implemented — the plan itself rates it "a complementary signal, not
   load-bearing" (firmware flaps connector status). Input-device (#10) and
   console-login (#11) — the load-bearing physical signals — are implemented.
+
+## Historical
+
+- **`secwatch` → `onionwarden` rename.** Early development used the internal
+  working name `secwatch`. The codebase was renamed before public release,
+  and the one deployed receiver carrying the legacy on-disk paths was
+  migrated separately as a one-off. The project has never shipped under the
+  `secwatch` name to external users, so no rename-in-place tooling lives in
+  this repo.
