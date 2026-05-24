@@ -5,5 +5,5 @@
 # resulting `receiver.pub` into this directory and commit it to YOUR fork
 # (do NOT commit `receiver.priv`).
 #
-# See receiver/MIGRATION_TO_PROXMOX.md §"key custody" for the full rotation
-# procedure.
+# See receiver/RECEIVER.md §"Rotating the signing key" for the full
+# 4-step dual-pin rotation procedure.

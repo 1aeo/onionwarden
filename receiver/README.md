@@ -13,7 +13,6 @@ verification, and pushes to ntfy on CRIT.
 | [`receiver-setup.sh`](receiver-setup.sh) | One-shot installer. Creates the per-host tree, applies `chattr +a`, installs scripts under `$ROOT/.bin`, prints the authorized_keys template. |
 | [`RECEIVER.md`](RECEIVER.md) | Full operator runbook: install, config knobs, key rotation, log rotation, host migration. |
 | [`receiver.pub.example`](receiver.pub.example) | Placeholder — generate your own with `../scripts/generate-receiver-key.sh`. |
-| [`MIGRATION_TO_PROXMOX.md`](MIGRATION_TO_PROXMOX.md) | Wrapper for one specific provider; points at `RECEIVER.md` for the generic flow. |
 
 ## Subcommands at a glance
 

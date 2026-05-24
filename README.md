@@ -45,8 +45,8 @@ See [`PLAN.md`](PLAN.md) for the full design, threat model, and phase
 breakdown (~104 KB; it's the spec). [`IMPLEMENTATION_NOTES.md`](IMPLEMENTATION_NOTES.md)
 captures build-time decisions. [`OPERATOR_DECISIONS.md`](OPERATOR_DECISIONS.md)
 records the configurable knobs and their fleet defaults.
-[`receiver/MIGRATION_TO_PROXMOX.md`](receiver/MIGRATION_TO_PROXMOX.md) is the
-runbook for moving the receiver between hosts.
+[`receiver/RECEIVER.md`](receiver/RECEIVER.md) is the operator runbook for
+the off-box receiver, including install, key rotation, and host migration.
 
 ## Phases
 

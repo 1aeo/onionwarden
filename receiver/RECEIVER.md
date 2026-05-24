@@ -1,9 +1,7 @@
 # RECEIVER.md — operator runbook
 
 Generic, deployment-agnostic install + operate guide for the off-box
-receiver. If you are migrating an existing receiver to a specific
-provider (e.g. Proxmox), follow this guide and then read
-`MIGRATION_TO_PROXMOX.md` for the provider-specific notes.
+receiver.
 
 ## Architecture (one screen)
 
@@ -128,13 +126,48 @@ That snapshots the current `selfhash` + `pubkeyhash` per host into
 
 ## Operating procedures
 
-### Rotating the signing key
+### Rotating the signing key (4-step dual-pin protocol)
 
-See `scripts/rotate-receiver-key.sh` and the **4-step dual-pin
-protocol** in `MIGRATION_TO_PROXMOX.md` §"Rotate the receiver signing
-key". Do NOT compress those four steps — skipping the overlap window
-makes every in-flight signed message unverifiable for the duration
-of the gap.
+The receiver signing key is currently inert (no live consumer), so
+rotation today is zero-risk for verification. The procedure below is
+the contract that future signing-of-digests code MUST honour, so
+rotation never opens a verification gap. Do NOT compress these four
+steps — skipping the overlap window makes every in-flight signed
+message unverifiable for the duration of the gap.
+
+1. **Generate the new keypair** on the receiver:
+   ```sh
+   sudo /opt/onionwarden/scripts/rotate-receiver-key.sh
+   ```
+   This atomically swaps the live keypair to the new one and keeps the
+   old as `receiver.{priv,pub}.YYYYMMDD-HHMMSS.bak`. The script prints
+   the sha256 fingerprint of both the new and old pubkeys.
+
+2. **Publish BOTH pubkeys** to the repo fork:
+   ```sh
+   # on the laptop, after scp'ing the new pubkey back:
+   cp receiver/receiver.pub receiver/receiver.pub.prev   # the OLD one
+   cp <new-pubkey-from-receiver> receiver/receiver.pub   # the NEW one
+   git add receiver/receiver.pub receiver/receiver.pub.prev
+   git commit -m "rotate receiver signing key — overlap window opens"
+   ```
+   Verify the sha256 of `receiver.pub` matches what the script printed
+   on the receiver: `openssl dgst -sha256 receiver/receiver.pub`.
+
+3. **Roll collectors to pin BOTH pubkeys.** Once signing-of-digests is
+   live, collectors will consult `verify_pubkey_paths = ["receiver.pub",
+   "receiver.pub.prev"]` and accept a signed message verified by EITHER.
+   Confirm the rollout reached every collector before step 4.
+
+4. **After the overlap window** (≥ the longest in-flight signed-message
+   TTL; 24h is ample for the current digest cadence), remove the
+   previous pubkey:
+   ```sh
+   git rm receiver/receiver.pub.prev
+   git commit -m "close receiver-key rotation overlap window"
+   # then on the receiver:
+   sudo rm /var/lib/onionwarden/receiver.{priv,pub}.YYYYMMDD-HHMMSS.bak
+   ```
 
 ### Rotating the append-only events.log
 
@@ -153,16 +186,14 @@ echo 1440 > /var/lib/onionwarden/data/<host>/.stale_minutes   # 24 h
 
 ### Migrating the receiver to a new host
 
-1. Snapshot the current receiver (e.g. `vzdump` on Proxmox).
+1. Snapshot the current receiver (provider-specific — e.g. `vzdump` on
+   Proxmox, EBS snapshot on AWS).
 2. Provision the new host; install packages; create users.
 3. rsync `/opt/onionwarden/` and `/var/lib/onionwarden/` to the new host.
 4. Re-apply `chattr +a` on `events.log` files on the new FS.
 5. Cut over per-monitored-host SSH config — update `receiver_host` /
    the SSH known-hosts pin to the new host's SSH key.
 6. Decommission the old receiver (stop cron + power off).
-
-`MIGRATION_TO_PROXMOX.md` covers the Proxmox-specific bits
-(`ssh.socket.d/listen.conf`, ufw, snapshot timing).
 
 ## Verification checklist (post-install)
 
