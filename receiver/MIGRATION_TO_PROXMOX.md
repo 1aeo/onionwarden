@@ -36,8 +36,8 @@ Two user accounts on the receiver:
 ### Deviations from the original brief (and why)
 
 The brief assumed a daemon model (Python HTTPS listener, `receiver.conf`,
-`systemctl enable onionwarden-receiver`). The upstream receiver in
-`secure-server/receiver/` is SSH-only — there is no daemon to enable.
+`systemctl enable onionwarden-receiver`). The receiver in this repo
+(`receiver/`) is SSH-only — there is no daemon to enable.
 Concretely:
 
 | Original brief | Actually deployed | Reason |

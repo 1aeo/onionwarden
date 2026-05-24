@@ -13,11 +13,27 @@ it does not just store events. Subcommands:
                             structurally cannot be). Exit 2 if any mismatch.
   seqcheck                  per-host events.log sequence-gap detection (M7):
                             a gap means an omitted event (a dropped CRIT).
+                            Stateful — only scans new events since last run.
   digest                    ONE fleet-rollup line per host for the last 24h
                             (H8 — one rollup, not nine all-clear pushes).
 
-Env: ONIONWARDEN_RECEIVER_ROOT (default ~/onionwarden), ONIONWARDEN_RECEIVER_NTFY
-(optional ntfy URL for verify-check CRIT pushes).
+Env:
+  ONIONWARDEN_RECEIVER_ROOT (default ~/onionwarden)
+      Per-host event tree root.
+  ONIONWARDEN_RECEIVER_NTFY (optional)
+      ntfy URL for verify-check CRIT pushes (one push per host per run).
+  ONIONWARDEN_STALE_MINUTES (default 30)
+      Default staleness threshold; per-host override at <host>/.stale_minutes.
+
+Examples — first-time bootstrap, then cron-driven steady-state:
+
+  # one-shot, after first events have landed:
+  onionwarden-receiver verify-record
+
+  # added to /etc/cron.d/onionwarden-receiver — see receiver/RECEIVER.md
+  */5 * * * *  onionwarden-receiver verify-check
+  */5 * * * *  onionwarden-receiver seqcheck
+  0 7 * * *    onionwarden-receiver digest
 """
 import calendar
 import json
@@ -187,7 +203,8 @@ def cmd_verify_check():
 
         kg_path = os.path.join(hd, "known_good.json")
         if not os.path.isfile(kg_path):
-            print("WARN  %s — no known-good recorded (run verify-record)" % host)
+            print("WARN  %s — no known-good recorded — "
+                  "run: onionwarden-receiver verify-record %s" % (host, host))
         else:
             try:
                 with open(kg_path) as fh:
@@ -197,7 +214,9 @@ def cmd_verify_check():
                 kg = None
             ev = latest_of_kind(hd, "selfreport")
             if kg is not None and ev is None:
-                print("WARN  %s — no selfreport event to compare" % host)
+                print("WARN  %s — no selfreport event to compare — "
+                      "is the host's onionwarden run reaching the receiver? "
+                      "(check %s/events.log)" % (host, host))
             elif kg is not None and ev is not None:
                 detail = ev.get("detail", {})
                 host_mismatched = False
