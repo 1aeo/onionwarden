@@ -41,11 +41,15 @@ def host_dirs():
     return out
 
 
+_PARSE_FAIL_COUNTS = {}
+
+
 def read_events(host_dir):
     """Yield parsed event dicts from a host's events.log (skips junk lines)."""
     path = os.path.join(host_dir, "events.log")
     if not os.path.isfile(path):
         return
+    fails = 0
     with open(path, "r", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -54,7 +58,10 @@ def read_events(host_dir):
             try:
                 yield json.loads(line)
             except json.JSONDecodeError:
+                fails += 1
                 continue
+    if fails:
+        _PARSE_FAIL_COUNTS[host_dir] = fails
 
 
 def latest_of_kind(host_dir, kind):
@@ -150,67 +157,159 @@ def cmd_verify_record(hosts):
     return 0
 
 
+def host_stale_minutes(hd, default):
+    """R3-F2: per-host override at <hd>/.stale_minutes; fall back to default."""
+    p = os.path.join(hd, ".stale_minutes")
+    if os.path.isfile(p):
+        try:
+            return int(open(p).read().strip())
+        except (ValueError, OSError):
+            pass
+    return default
+
+
 def cmd_verify_check():
     mismatches = 0
-    stale_minutes = int(os.environ.get("ONIONWARDEN_STALE_MINUTES", "30"))
+    stale_default = int(os.environ.get("ONIONWARDEN_STALE_MINUTES", "30"))
     for host, hd in host_dirs():
-        # R8-3: a host that has stopped APPENDING has gone dark on the
-        # receiver even if its dead-man pings still arrive (separate channel,
-        # or its events were redirected via a forged host_id).
+        host_msgs = []   # R3-F5: dedup ntfy — at most one push per host per run
+
+        # R8-3: a host that has stopped APPENDING has gone dark on the receiver
+        # even if its dead-man pings still arrive (separate channel, or its
+        # events were redirected via a forged host_id).
+        stale_minutes = host_stale_minutes(hd, stale_default)
         age = events_log_age_seconds(hd)
         if age is not None and age > stale_minutes * 60:
             mismatches += 1
-            msg = ("CRIT  %s — events.log silent for %d min (> %d) — host has "
-                   "stopped appending" % (host, age / 60, stale_minutes))
-            print(msg)
-            ntfy("onionwarden receiver CRIT: %s silent" % host, msg)
+            line = ("CRIT  %s — events.log silent for %d min (> %d) — host has "
+                    "stopped appending" % (host, age / 60, stale_minutes))
+            print(line); host_msgs.append(line)
+
         kg_path = os.path.join(hd, "known_good.json")
         if not os.path.isfile(kg_path):
             print("WARN  %s — no known-good recorded (run verify-record)" % host)
-            continue
-        with open(kg_path) as fh:
-            kg = json.load(fh)
-        ev = latest_of_kind(hd, "selfreport")
-        if not ev:
-            print("WARN  %s — no selfreport event to compare" % host)
-            continue
-        detail = ev.get("detail", {})
-        for field in ("selfhash", "pubkeyhash"):
-            want, got = kg.get(field), detail.get(field)
-            if want and got and want != got:
-                mismatches += 1
-                msg = ("CRIT  %s — %s MISMATCH: known-good=%s reported=%s"
-                       % (host, field, want, got))
-                print(msg)
-                ntfy("onionwarden receiver CRIT: %s %s mismatch" % (host, field), msg)
-        if not mismatches:
-            print("ok    %s — selfhash + pubkeyhash match known-good" % host)
+        else:
+            try:
+                with open(kg_path) as fh:
+                    kg = json.load(fh)
+            except (json.JSONDecodeError, OSError) as exc:
+                print("WARN  %s — known_good.json unreadable: %s" % (host, exc))
+                kg = None
+            ev = latest_of_kind(hd, "selfreport")
+            if kg is not None and ev is None:
+                print("WARN  %s — no selfreport event to compare" % host)
+            elif kg is not None and ev is not None:
+                detail = ev.get("detail", {})
+                host_mismatched = False
+                for field in ("selfhash", "pubkeyhash"):
+                    want, got = kg.get(field), detail.get(field)
+                    if want and got and want != got:
+                        mismatches += 1; host_mismatched = True
+                        line = ("CRIT  %s — %s MISMATCH: known-good=%s reported=%s"
+                                % (host, field, want, got))
+                        print(line); host_msgs.append(line)
+                if not host_mismatched and not host_msgs:
+                    print("ok    %s — selfhash + pubkeyhash match known-good" % host)
+
+        # R3-F5: single ntfy push per host per run, body lists all triggers.
+        if host_msgs:
+            ntfy("onionwarden receiver CRIT: %s" % host, "\n".join(host_msgs))
     return 2 if mismatches else 0
 
 
+def _seqcheck_state_load(hd):
+    p = os.path.join(hd, ".seqcheck.state.json")
+    if not os.path.isfile(p):
+        return {"last_seq": None, "last_offset": 0, "ack_resets_through_seq": None}
+    try:
+        with open(p) as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {"last_seq": None, "last_offset": 0, "ack_resets_through_seq": None}
+
+
+def _seqcheck_state_save(hd, state):
+    p = os.path.join(hd, ".seqcheck.state.json")
+    with open(p, "w") as fh:
+        json.dump(state, fh)
+
+
 def cmd_seqcheck():
+    """R3-F3 + F4: seek-based, stateful per-host scan.
+
+    Each run resumes from <hd>/.seqcheck.state.json: last byte offset, last
+    seq seen, and a 'reset acked through' marker (so a legitimate appender
+    restart only WARNs once). Gaps are computed only across the NEW slice,
+    against the prior last_seq, so memory and CPU are bounded per run."""
     issues = 0
     for host, hd in host_dirs():
-        seqs = [ev["seq"] for ev in read_events(hd)
-                if isinstance(ev.get("seq"), int)]
-        if not seqs:
-            print("ok    %s — no sequenced events yet" % host)
+        state = _seqcheck_state_load(hd)
+        path = os.path.join(hd, "events.log")
+        new_seqs = []
+        new_offset = state["last_offset"]
+        if os.path.isfile(path):
+            with open(path, "r", errors="replace") as fh:
+                if state["last_offset"] > os.path.getsize(path):
+                    # log was rotated; restart from 0.
+                    state = {"last_seq": None, "last_offset": 0,
+                             "ack_resets_through_seq": None}
+                fh.seek(state["last_offset"])
+                # Use readline (not `for line in fh`) so fh.tell() stays valid.
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
+                    new_offset = fh.tell()
+                    line = line.strip()
+                    if not line or not line.startswith("{"):
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    s = ev.get("seq")
+                    if isinstance(s, int) and s >= 0:
+                        new_seqs.append(s)
+
+        prior_last = state["last_seq"]
+        all_seqs = ([prior_last] if prior_last is not None else []) + new_seqs
+        if not new_seqs:
+            print("ok    %s — no new events since last run" % host)
+            state["last_offset"] = new_offset
+            _seqcheck_state_save(hd, state)
             continue
-        lo, hi = min(seqs), max(seqs)
-        present = set(seqs)
+
+        lo, hi = min(all_seqs), max(all_seqs)
+        present = set(all_seqs)
         gaps = [n for n in range(lo, hi + 1) if n not in present]
-        # A decreasing seq mid-stream means a reset (possible state wipe).
-        resets = sum(1 for a, b in zip(seqs, seqs[1:]) if b <= a)
+        # R3-F4: reset detected only if the NEW slice has a step-down.
+        ack_through = state.get("ack_resets_through_seq")
+        new_reset = any(b <= a for a, b in zip(new_seqs, new_seqs[1:]))
+        if prior_last is not None and new_seqs and new_seqs[0] <= prior_last:
+            new_reset = new_reset or (ack_through is None or new_seqs[0] > ack_through)
+        # If we already acked all resets up to this max, suppress further WARN.
+        if new_reset and ack_through is not None and max(new_seqs) <= ack_through:
+            new_reset = False
+
         if gaps:
             issues += 1
             print("CRIT  %s — events.log sequence gaps: %s missing in [%d..%d] (%s)"
                   % (host, len(gaps), lo, hi, gaps[:20]))
-        if resets:
+        if new_reset:
             issues += 1
-            print("WARN  %s — %d sequence reset(s) — host state/ may have been wiped"
-                  % (host, resets))
-        if not gaps and not resets:
-            print("ok    %s — %d events, contiguous [%d..%d]" % (host, len(seqs), lo, hi))
+            print("WARN  %s — sequence reset detected (lowest new seq=%d <= prior=%s) "
+                  "— host state/ may have been wiped"
+                  % (host, new_seqs[0], prior_last))
+        if not gaps and not new_reset:
+            print("ok    %s — %d new events, contiguous [%d..%d]"
+                  % (host, len(new_seqs), lo, hi))
+
+        # Persist state: ratchet last_seq, ack any reset just reported.
+        state["last_seq"] = max(new_seqs)
+        state["last_offset"] = new_offset
+        if new_reset:
+            state["ack_resets_through_seq"] = max(new_seqs)
+        _seqcheck_state_save(hd, state)
     return 2 if issues else 0
 
 
@@ -247,6 +346,10 @@ def cmd_digest():
                 if d.get("disabled", 0):
                     note = "disabled-checks=%s" % d["disabled"]
         flag = "  <-- CRIT" if crit else ""
+        # R3-F7: surface in-progress corruption to operator.
+        pf = _PARSE_FAIL_COUNTS.get(hd, 0)
+        if pf:
+            note = (note + " " if note else "") + "parse-fail=%d" % pf
         print("%-14s %5d %5d %5d  %-9s %s%s"
               % (host, crit, warn, info, version, note, flag))
     return 0

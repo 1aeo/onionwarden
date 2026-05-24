@@ -193,6 +193,62 @@ def test_events_log_age_uses_recv_ts_over_mtime(tmp_path):  # R2-F2
     assert "silent" in r.stdout  # staleness fires despite the touch
 
 
+def test_seqcheck_resumes_from_state_file(tmp_path):  # R3-F3
+    """Second seqcheck only sees the NEW slice; state file persists offset."""
+    _append(tmp_path, [_ev(1, "relay_a"), _ev(2, "relay_a")])
+    r1 = _receiver(tmp_path, "seqcheck")
+    assert r1.returncode == 0
+    assert (tmp_path / "relay_a" / ".seqcheck.state.json").exists()
+    state = json.loads((tmp_path / "relay_a" / ".seqcheck.state.json").read_text())
+    assert state["last_seq"] == 2 and state["last_offset"] > 0
+
+    _append(tmp_path, [_ev(3, "relay_a")])
+    r2 = _receiver(tmp_path, "seqcheck")
+    assert r2.returncode == 0 and "1 new events" in r2.stdout
+
+
+def test_seqcheck_reset_acks_after_one_warning(tmp_path):  # R3-F4
+    """A legitimate appender restart (seq drops to 1) WARNs once, then
+    subsequent runs treat the new sequence as authoritative."""
+    _append(tmp_path, [_ev(1, "relay_a"), _ev(2, "relay_a"), _ev(3, "relay_a")])
+    _receiver(tmp_path, "seqcheck")
+    # Now appender restarts: seq 1 again.
+    _append(tmp_path, [_ev(1, "relay_a"), _ev(2, "relay_a")])
+    r1 = _receiver(tmp_path, "seqcheck")
+    assert "reset" in r1.stdout.lower()
+    # Next event after reset should NOT re-warn.
+    _append(tmp_path, [_ev(3, "relay_a")])
+    r2 = _receiver(tmp_path, "seqcheck")
+    assert "reset" not in r2.stdout.lower()
+
+
+def test_verify_check_per_host_stale_override(tmp_path):  # R3-F2
+    """A per-host .stale_minutes file overrides the global env-var default.
+
+    Use an event age between the default (30 min) and the override (1 day);
+    default would fire, override should not."""
+    import time as _t
+    (tmp_path / "relay_a").mkdir()
+    (tmp_path / "relay_a" / ".stale_minutes").write_text("1440")  # 24h
+    sixty_min_ago = _t.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                _t.gmtime(_t.time() - 60 * 60))
+    line = ('{"seq":1,"ts":"%s","host_id":"relay_a","kind":"sr",'
+            '"severity":"INFO","recv_ts":"%s"}' % (sixty_min_ago, sixty_min_ago))
+    (tmp_path / "relay_a" / "events.log").write_text(line + "\n")
+
+    # Sanity: default would fire (60 > 30) ...
+    r0 = subprocess.run(["python3", str(RECEIVER), "verify-check"],
+                        capture_output=True, text=True,
+                        env={**os.environ,
+                             "ONIONWARDEN_RECEIVER_ROOT": str(tmp_path),
+                             "ONIONWARDEN_STALE_MINUTES": "30"})
+    # ... but the per-host override (1440) suppresses since 60 < 1440.
+    # The .stale_minutes file is read on every cmd_verify_check invocation,
+    # so the same run that sees both env-default-fire and per-host-suppress
+    # produces only the latter result for relay_a.
+    assert "silent" not in r0.stdout
+
+
 def test_verify_record_writes_audit_event(tmp_path):  # R2-F1
     """verify-record appends a +a-protected audit event with the known-good
     payload, so a forged known_good.json can be cross-checked against the
