@@ -13,11 +13,58 @@ set -euo pipefail
 CHECK_NAME="kernel_state"
 CHECK_CADENCE="slow"
 
-# Restrict-style sysctls — higher value = more restrictive, so a DROP is a
-# weakening. lockdown ordering: none < integrity < confidentiality.
+# Restrict-style sysctls. For most, higher value = more restrictive so a DROP
+# is a weakening. Two exceptions are explicitly tracked as "this value must
+# stay" (rp_filter and tcp_syncookies — a drop to 0 is a clear regression but
+# raising past the recommended is not a weakening). lockdown ordering: none <
+# integrity < confidentiality.
+#
+# Source set: the existing 5 originally tracked + 7 added per the CIS Debian
+# 12 / STIG benchmarks: fs.suid_dumpable, kernel.randomize_va_space, plus the
+# core IP-spoofing / redirect / source-route protections every server should
+# carry. Multi-family entries are kept distinct (e.g. v4 vs v6 accept_redirects)
+# so a drift on one family doesn't get masked.
+#
+# Recommended values (REFERENCE ONLY — onionwarden does not auto-apply; the
+# operator decides per-host whether to harden). A snapshot report-writer
+# surfaces "current value vs recommended" as an INFO finding for the operator;
+# this collector's analyze() only fires on drift FROM the signed baseline.
+# Sources: CIS Debian 12 Benchmark §3, RHEL 9 STIG, Linux kernel docs.
+#
+#   kernel.kptr_restrict           = 2     (hide /proc/kallsyms from all)
+#   kernel.dmesg_restrict          = 1     (non-root can't read dmesg)
+#   kernel.unprivileged_bpf_disabled = 2   (BPF disabled including admin)
+#   kernel.kexec_load_disabled     = 1     (bare metal only; guest leaves to host)
+#   kernel.yama.ptrace_scope       = 1     (parent-only ptrace)
+#   kernel.randomize_va_space      = 2     (full ASLR)
+#   fs.suid_dumpable               = 0     (no SUID coredumps)
+#   fs.protected_hardlinks         = 1
+#   fs.protected_symlinks          = 1
+#   fs.protected_fifos             = 2
+#   fs.protected_regular           = 2
+#   net.ipv4.tcp_syncookies        = 1
+#   net.ipv4.conf.*.rp_filter      = 2     (loose for multi-IP tor relays;
+#                                           strict=1 drops asymmetric paths)
+#   net.ipv4.conf.*.accept_redirects = 0
+#   net.ipv4.conf.*.send_redirects   = 0
+#   net.ipv4.conf.*.accept_source_route = 0
+#   net.ipv4.conf.*.log_martians     = 1
+#   net.ipv6.conf.*.accept_redirects = 0
+#   net.ipv6.conf.*.accept_source_route = 0
+#   lockdown                       = integrity  (kernel cmdline; reboot to apply)
 _KS_SYSCTLS="kernel.kptr_restrict kernel.dmesg_restrict \
 kernel.unprivileged_bpf_disabled kernel.kexec_load_disabled \
-kernel.yama.ptrace_scope"
+kernel.yama.ptrace_scope kernel.randomize_va_space \
+fs.suid_dumpable fs.protected_hardlinks fs.protected_symlinks \
+fs.protected_fifos fs.protected_regular \
+net.ipv4.tcp_syncookies \
+net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter \
+net.ipv4.conf.all.accept_redirects net.ipv4.conf.default.accept_redirects \
+net.ipv4.conf.all.send_redirects net.ipv4.conf.default.send_redirects \
+net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route \
+net.ipv4.conf.all.log_martians \
+net.ipv6.conf.all.accept_redirects net.ipv6.conf.default.accept_redirects \
+net.ipv6.conf.all.accept_source_route net.ipv6.conf.default.accept_source_route"
 
 kernel_state_collect() {
   local v
