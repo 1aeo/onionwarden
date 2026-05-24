@@ -34,22 +34,9 @@ ssh_collect() {
   done < /etc/passwd
   # Effective sshd config. `sshd -T` needs root and a valid config; tolerate
   # its failure instead of aborting the whole collector.
-  #
-  # PATH: non-interactive `bash -s` (the snapshot tool's wire) inherits a
-  # minimal PATH on Debian 13 (/usr/local/bin:/usr/bin:/bin:/usr/games — no
-  # /usr/sbin), so a plain `command -v sshd` misses `/usr/sbin/sshd`. Fall
-  # back to the well-known absolute paths before giving up.
-  local sshd_bin=""
   if command -v sshd >/dev/null 2>&1; then
-    sshd_bin=$(command -v sshd)
-  else
-    for cand in /usr/sbin/sshd /usr/lib/openssh/sshd /sbin/sshd; do
-      [ -x "$cand" ] && { sshd_bin=$cand; break; }
-    done
-  fi
-  if [ -n "$sshd_bin" ]; then
     local sshd_t key val
-    sshd_t=$("$sshd_bin" -T 2>/dev/null) || sshd_t=""
+    sshd_t=$(sshd -T 2>/dev/null) || sshd_t=""
     if [ -n "$sshd_t" ]; then
       printf '%s\n' "$sshd_t" | while read -r key val; do
         key=$(printf '%s' "$key" | tr 'A-Z' 'a-z')
