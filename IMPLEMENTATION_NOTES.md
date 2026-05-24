@@ -129,8 +129,7 @@ would flood the outbound check.
 - macOS `openssl` is LibreSSL 3.3.6, which lacks Ed25519 — so the test suite
   uses the pure-Python verifier backend (`ONIONWARDEN_VERIFY_BACKEND=python`).
   Production on Ubuntu 24.04 / Debian 13 uses `openssl pkeyutl` (OpenSSL 3.x).
-- Run the suite: `cd secure-server && python3 -m pytest tests/ -q` (129 tests
-  after the 10 critique rounds).
+- Run the suite: `python3 -m pytest tests/ -q` (154 tests, all passing).
 
 ## Post-critique residuals (see CRITIQUE_R*.md / CRITIQUE_LOG.md)
 
