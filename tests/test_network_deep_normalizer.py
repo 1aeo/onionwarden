@@ -267,10 +267,19 @@ def test_state_class_buckets_collapse(tmp_path):
     assert buckets == {"ESTABLISHED", "SYN", "CLOSING"}, buckets
     # LISTEN (0A) and CLOSE (07) must be ABSENT from outbound at all — they
     # have no remote endpoint or are dead-socket transients respectively.
+    # Assert absence explicitly in BOTH the normalized and RAW outputs so a
+    # regression that emits them on either side fails loudly.
+    assert "LISTEN" not in buckets and "CLOSE" not in buckets, buckets
+    raw_joined = "\n".join(raw)
+    assert " LISTEN " not in raw_joined and " CLOSE " not in raw_joined, raw
     norm = _outbound_lines(out)
+    norm_joined = "\n".join(norm)
+    assert " LISTEN " not in norm_joined and " CLOSE " not in norm_joined, norm
     # 11 fine states; 2 skipped (07, 0A); 9 destinations emitted; one row each
     # in normalized form (each destination distinct).
     assert len(norm) == 9, norm
+    # And exactly 9 RAW rows for the same reason (no LISTEN/CLOSE leak).
+    assert len(raw) == 9, raw
 
 
 # ---------------------------------------------------------------------------
