@@ -3,6 +3,10 @@
 .env.local
 *.env
 hosts/*.conf
+hosts/*.conf.draft
+hosts/*.conf.sig
+hosts/*.baseline/
+hosts/*.snapshot/
 hosts/*.local
 
 # Snapshots + dry-run artefacts
