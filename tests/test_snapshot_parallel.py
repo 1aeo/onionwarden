@@ -215,6 +215,12 @@ def test_parallel_runs_byte_identical(fake_ssh, tmp_path):
     #                             collector short-circuits with a constant
     #                             marker, so this entry is harmless there
     #                             and useful for keeping Linux CI from flaking.
+    # network_deep.current is DELIBERATELY NOT in this set — see commit
+    # "network_deep: coarser outbound normalizer". The collector canonicalises
+    # outbound rows to `outbound <comm> <dst:port>` (drops ephemeral src_port
+    # and TCP fine-state) so the file is byte-identical across parallel
+    # snapshot runs even on a busy relay. Forensic 5-tuple detail lives in
+    # raw/network_deep.raw and is NOT subject to byte-identity.
     ALLOWED_VARIABLE = {"profile.current", "process_ancestry.current"}
     # Linux-only entries: these collectors short-circuit on macOS
     # (`na no-systemctl` / `na no-journalctl` / no live /usr,/etc walks),
