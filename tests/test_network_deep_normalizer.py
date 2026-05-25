@@ -290,8 +290,23 @@ def test_snapshot_tool_relocates_raw_lines(tmp_path):
     """A snapshot bundle is run via the fake-ssh stub that lets the collector
     run locally. The post-processing pass in onionwarden-snapshot must move
     `RAW: ` lines out of `network_deep.current` into `raw/network_deep.raw`,
-    leaving `.current` byte-identical across back-to-back runs."""
+    leaving `.current` byte-identical across back-to-back runs.
+
+    A fake /proc is injected via ONIONWARDEN_PROC so the collector emits at
+    least one RAW line regardless of the test host's OS — without this the
+    macOS run produces zero RAW lines and the relocation assertion would
+    pass vacuously."""
     import stat
+    # One eligible TCP row guarantees the collector emits >=1 RAW line.
+    proc = tmp_path / "proc"
+    pids = [{"pid": 1000, "comm": "sshd",
+             "cgroup": "0::/system.slice/ssh.service\n",
+             "sockets": [100000]}]
+    conns = [{"local": _hex_addr("10.0.0.1", 49152),
+              "rem": _hex_addr("1.2.3.4", 22),
+              "st": "01", "inode": 100000}]
+    _make_proc(str(proc), conns, pids)
+
     fake_ssh = tmp_path / "fake-ssh.sh"
     fake_ssh.write_text(r"""#!/usr/bin/env bash
 shift
@@ -311,6 +326,7 @@ exec bash -c "$cmd"
     env = dict(os.environ)
     env["ONIONWARDEN_SNAPSHOT_SSH"] = str(fake_ssh)
     env["ONIONWARDEN_SNAPSHOT_PERCHECK"] = "8"
+    env["ONIONWARDEN_PROC"] = str(proc)
     p = subprocess.run(
         [BASH, str(ROOT / "bin" / "onionwarden-snapshot"), "localhost",
          "--out", str(out), "--parallel", "1"],
@@ -319,13 +335,14 @@ exec bash -c "$cmd"
     cur = (out / "network_deep.current").read_text()
     # No RAW: lines must leak into .current.
     assert "RAW: " not in cur, "RAW: lines must be stripped from .current"
-    # On macOS the /proc/net/tcp probe fails and the collector emits
-    # `outbound na no-procnet` — no RAW lines emitted, so the raw companion
-    # file may or may not exist. On Linux with a real /proc, RAW lines are
-    # always emitted and the companion file MUST exist. We accept either.
+    # With the fake /proc seeded above, the collector must have emitted at
+    # least one RAW line. The companion file therefore MUST exist — making
+    # the relocation assertion non-vacuous on every supported test host.
     raw_path = out / "raw" / "network_deep.raw"
-    if raw_path.exists():
-        raw_content = raw_path.read_text()
-        # Every line must be in the raw companion's expected format.
-        for line in raw_content.splitlines():
-            assert line.startswith("outbound_raw "), line
+    assert raw_path.exists(), \
+        f"raw companion missing; snapshot stderr:\n{p.stderr}"
+    raw_content = raw_path.read_text()
+    assert raw_content.strip(), "raw companion present but empty"
+    # Every line must be in the raw companion's expected format.
+    for line in raw_content.splitlines():
+        assert line.startswith("outbound_raw "), line
