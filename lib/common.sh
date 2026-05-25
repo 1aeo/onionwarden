@@ -129,9 +129,10 @@ sha256_string() {
 # `<(filter "$base") <(filter "$cur") | sort -u` ritual to one call.
 #
 # Two shapes cover ~all of the in-tree callsites:
-#   *_field FIELD COL BASE CUR     records of the form: "FIELD value1 value2 …"
-#                                   (extract column COL where $1==FIELD)
-#   *_prefix PREFIX BASE CUR        records of the form: "PREFIX rest of line"
+#   *_field BASE CUR FIELD [COL]    records of the form: "FIELD value1 value2 …"
+#                                   (extract column COL where $1==FIELD; COL
+#                                    defaults to 2)
+#   *_prefix BASE CUR PREFIX        records of the form: "PREFIX rest of line"
 #                                   (emit the full line; caller strips PREFIX)
 
 state_added_field() {
