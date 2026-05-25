@@ -39,9 +39,9 @@ a pure extraction; output bytes identical).
 
 Building on Round 1; the four worth extracting are:
 
-1. **`state_added_field FIELD COL BASE CUR`** + **`state_removed_field`** — the
-   awk-`$1==X` flavour (12 callsites).
-2. **`state_added_prefix PREFIX BASE CUR`** + **`state_removed_prefix`** — the
+1. **`state_added_field BASE CUR FIELD [COL]`** + **`state_removed_field`** — the
+   awk-`$1==X` flavour (12 callsites). `COL` defaults to 2.
+2. **`state_added_prefix BASE CUR PREFIX`** + **`state_removed_prefix`** — the
    grep-`^X ` flavour (16 callsites).
 3. **`json_field FILE KEY`** in `lib/common.sh` — replaces `manifest_get`
    (`lib/baseline.sh:32`), `_supp_field` (`lib/suppress.sh:28`), and the inline
@@ -113,7 +113,7 @@ Before (typical, in `lib/checks/auth_log.sh:84-86`):
 
 After:
 ```bash
-  done <<< "$(state_added_field sudouser 2 "$base_file" "$cur_file")"
+  done <<< "$(state_added_field "$base_file" "$cur_file" sudouser 2)"
 ```
 
 Helpers (in `lib/common.sh`):
