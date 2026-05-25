@@ -51,7 +51,48 @@ SSH_OPTS=()
 REMOTE_TIMEOUT="${ONIONWARDEN_SNAPSHOT_TIMEOUT:-900}"
 PERCHECK_TIMEOUT="${ONIONWARDEN_SNAPSHOT_PERCHECK:-60}"
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+# Heredoc-based help: edits to the file header (adding/removing flags) don't
+# silently truncate --help output, which a brittle `sed -n '2,Np'` range would.
+usage() {
+  cat <<'__USAGE__'
+onionwarden-snapshot — read-only remote state capture (Mode A dry-run).
+
+SSHes into a target host, runs every check's collector remotely, and gathers
+the per-check state into a local snapshot directory. The dispatcher can then
+analyse it offline with `onionwarden-run --from-snapshot`.
+
+STRICTLY READ-ONLY on the target: collector code is streamed over SSH stdin
+(`bash -s`); no file is ever written remotely; every collector runs only read
+commands; the remote run is wrapped `timeout ... nice -n19` to stay polite;
+default is a non-root session — `--with-sudo` (sudo -n) is opt-in.
+
+Parallel execution: by default opens up to --parallel N (default 8) concurrent
+SSH sessions, each running ONE check. Snapshot completes in roughly
+max(check time) instead of sum(check time) — typically a 3-5x speedup.
+
+Usage:
+  onionwarden-snapshot HOST [--out DIR] [--with-sudo] [--ssh-opt OPT]...
+                       [--parallel N] [--single-bundle]
+                       [--print-bundle | --print-check CHECK]
+
+Options:
+  --out DIR             snapshot output directory (default: ./snapshots/HOST-TS)
+  --with-sudo           use `sudo -n` on the remote (root-only reads)
+  --ssh-opt OPT         pass-through ssh -o OPT (repeatable)
+  --parallel N          run N checks concurrently (default 8, max 32)
+  --single-bundle       legacy single-SSH bundle (one remote session, serial)
+  --print-bundle        print the legacy full bundle to stdout and exit
+  --print-check CHECK   print the per-check bundle for CHECK and exit
+  -h, --help            show this help and exit
+
+Env:
+  ONIONWARDEN_SNAPSHOT_SSH        override the ssh client (tests)
+  ONIONWARDEN_SNAPSHOT_PARALLEL   default --parallel value
+  ONIONWARDEN_SNAPSHOT_TIMEOUT    overall remote timeout (single-bundle, sec)
+  ONIONWARDEN_SNAPSHOT_PERCHECK   per-check collector timeout (sec)
+__USAGE__
+  exit "${1:-0}"
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
