@@ -84,17 +84,21 @@ def fake_ssh_sleep(tmp_path):
     return str(p)
 
 
-def _run_snapshot(out_dir, fake_ssh_path, parallel, extra_env=None):
+def _run_snapshot(out_dir, fake_ssh_path, parallel, extra_env=None,
+                  single_bundle=False):
     """Drive bin/onionwarden-snapshot end-to-end with the fake-ssh stub."""
     env = dict(os.environ)
     env["ONIONWARDEN_SNAPSHOT_SSH"] = fake_ssh_path
     env["ONIONWARDEN_SNAPSHOT_PERCHECK"] = "8"
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(
-        [BASH, SNAPSHOT_BIN, "localhost",
-         "--out", str(out_dir), "--parallel", str(parallel)],
-        capture_output=True, text=True, env=env, timeout=300)
+    argv = [BASH, SNAPSHOT_BIN, "localhost", "--out", str(out_dir)]
+    if single_bundle:
+        argv.append("--single-bundle")
+    else:
+        argv.extend(["--parallel", str(parallel)])
+    return subprocess.run(argv, capture_output=True, text=True, env=env,
+                          timeout=300)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +271,67 @@ printf '%s' "$bundle" | bash -s
     assert (out_dir / "clock.exit").read_text().strip() == "17"
     assert "forced-failure" in (out_dir / "clock.err").read_text()
     # But other checks (e.g. accounts) STILL produced output.
+    assert (out_dir / "accounts.exit").read_text().strip() == "0"
+
+
+# ---------------------------------------------------------------------------
+# single-bundle mode parity (regression — see CodeRabbit feedback on PR #3)
+# ---------------------------------------------------------------------------
+
+def test_single_bundle_writes_per_check_exit_files(fake_ssh, tmp_path):
+    """--single-bundle must write one .exit file per check, same as --parallel.
+
+    Before this fix, the legacy single-bundle path emitted only the per-check
+    .current files; the report loop that reads `<check>.exit` to compute
+    failed=N therefore always read 0 and any per-check collector failure was
+    invisible to operators and CI gates. The bundle now embeds the rc in the
+    END delimiter and the dispatcher's awk pass writes the .exit file."""
+    out_dir = tmp_path / "snap"
+    p = _run_snapshot(out_dir, fake_ssh, parallel=1, single_bundle=True)
+    assert p.returncode in (0, 2), \
+        f"single-bundle exited {p.returncode}\nstdout:\n{p.stdout}\nstderr:\n{p.stderr}"
+    missing_exit = [c for c in CHECK_NAMES
+                    if not (out_dir / f"{c}.exit").exists()]
+    assert not missing_exit, \
+        f"single-bundle did not write .exit files for: {missing_exit}"
+    # meta.txt records the mode so operators can tell the modes apart.
+    meta = (out_dir / "raw" / "meta.txt").read_text()
+    assert "parallel=single-bundle" in meta, meta
+
+
+def test_single_bundle_propagates_collector_failure(tmp_path):
+    """If a collector inside the single-bundle stream exits non-zero, the END
+    marker carries that rc and the resulting .exit file reflects it (so the
+    failure-count loop counts it and the script exits 2)."""
+    out_dir = tmp_path / "snap"
+    stub = tmp_path / "ssh-clock-fail.sh"
+    stub.write_text(r"""#!/usr/bin/env bash
+shift
+cmd="$*"
+while :; do
+  case "$cmd" in
+    "timeout "[0-9]*) cmd="${cmd#timeout [0-9]* }" ;;
+    "nice -n "[0-9]*) cmd="${cmd#nice -n [0-9]* }" ;;
+    "sudo -n "*)      cmd="${cmd#sudo -n }" ;;
+    *) break ;;
+  esac
+done
+# Inject a clock_collect override AFTER all inlined check files (which define
+# the real clock_collect) but BEFORE the driver loop runs. The bundle ends
+# with `for __c in ...; do __snap "$__c"; done` — inserting the override on
+# the line above forces clock_collect to exit 42.
+bundle=$(cat | sed -e 's|^for __c in|clock_collect() { return 42; }\
+&|')
+printf '%s' "$bundle" | bash -c "$cmd"
+""")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    p = _run_snapshot(out_dir, str(stub), parallel=1, single_bundle=True)
+    # The script must surface partial-failure via exit 2 (same contract as
+    # the parallel path) — before this fix it would have exited 0.
+    assert p.returncode == 2, \
+        f"expected exit 2 from single-bundle clock failure, got {p.returncode}\n{p.stdout}\n{p.stderr}"
+    assert (out_dir / "clock.exit").read_text().strip() == "42"
+    # Other checks must still be marked rc=0.
     assert (out_dir / "accounts.exit").read_text().strip() == "0"
 
 

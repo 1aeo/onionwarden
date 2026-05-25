@@ -183,8 +183,9 @@ __snap() {
     kill -KILL -- -"$__p" 2>/dev/null || kill -KILL "$__p" 2>/dev/null ) 2>/dev/null &
   __w=$!
   wait "$__p" 2>/dev/null
+  __rc=$?
   kill -- -"$__w" 2>/dev/null; kill "$__w" 2>/dev/null; wait "$__w" 2>/dev/null
-  printf '###ONIONWARDEN-SNAPSHOT-END:%s###\n' "$1"
+  printf '###ONIONWARDEN-SNAPSHOT-END:%s:%s###\n' "$1" "$__rc"
 }
 __SNAPFN__
   # The `profile` check's collector IS profile_detect, so the loop below
@@ -294,14 +295,29 @@ if [ "$SINGLE_BUNDLE" = 1 ]; then
     log_warn "snapshot: remote collection exited non-zero — partial data; see raw/remote-stderr.log"
   fi
   [ -s "$RAW" ] || die "snapshot: remote collection produced no output — aborting"
-  # split the delimited stream into per-check state files
+  # Split the delimited stream into per-check state files AND per-check .exit
+  # files. The END marker carries the collector's return code as
+  # `###ONIONWARDEN-SNAPSHOT-END:NAME:RC###`, so single-bundle mode produces
+  # the same .exit-file shape as the parallel path — the failure-count loop
+  # below works identically for both modes. Checks present in the markers but
+  # missing an END line (truncated stream) get rc=124 (timeout-style) so they
+  # still surface as FAILED in the report rather than silently passing.
   awk -v dir="$OUT" '
     /^###ONIONWARDEN-SNAPSHOT:/ {
+      if (name != "") { print 124 > (dir "/" name ".exit"); close(dir "/" name ".exit") }
       name = $0; sub(/^###ONIONWARDEN-SNAPSHOT:/, "", name); sub(/###$/, "", name)
       out = dir "/" name ".current"; printf "" > out; next
     }
-    /^###ONIONWARDEN-SNAPSHOT-END:/ { out = ""; next }
+    /^###ONIONWARDEN-SNAPSHOT-END:/ {
+      payload = $0; sub(/^###ONIONWARDEN-SNAPSHOT-END:/, "", payload); sub(/###$/, "", payload)
+      end_name = payload; end_rc = "0"
+      idx = index(payload, ":")
+      if (idx > 0) { end_name = substr(payload, 1, idx - 1); end_rc = substr(payload, idx + 1) }
+      print end_rc > (dir "/" end_name ".exit"); close(dir "/" end_name ".exit")
+      name = ""; out = ""; next
+    }
     out { print >> out }
+    END { if (name != "") { print 124 > (dir "/" name ".exit"); close(dir "/" name ".exit") } }
   ' "$RAW"
 else
 # =============================================================================
