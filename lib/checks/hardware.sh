@@ -124,9 +124,7 @@ hardware_analyze() {
       fi
     done
     emit_finding "$CHECK_NAME" mounts "$sev" "$summary" "absent" "$tgt $fstype $hasexec" false
-  done <<< "$(comm -13 \
-      <(grep '^mount ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^mount ' "$cur_file"  2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" mount)"
 
   # DMI drift -> WARN.
   while IFS= read -r line; do
@@ -135,9 +133,7 @@ hardware_analyze() {
       "DMI/firmware value changed since baseline: $(printf '%s' "$line" | sed 's/^dmi //')" \
       "$(grep "^dmi $(printf '%s' "$line" | awk '{print $2}') " "$base_file" | sed 's/^dmi //' | head -n1)" \
       "$(printf '%s' "$line" | sed 's/^dmi //')" false
-  done <<< "$(comm -13 \
-      <(grep '^dmi ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^dmi ' "$cur_file"  2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" dmi)"
 
   # CPU topology drift -> INFO (VM resize).
   local bcpu ccpu

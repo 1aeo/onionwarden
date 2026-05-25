@@ -123,6 +123,52 @@ sha256_string() {
   printf '%s' "$1" | $_sha256_tool 2>/dev/null | awk '{print $1}'
 }
 
+# --- state-file diff helpers ---------------------------------------------
+# Every check follows the same pattern: extract a subset from baseline + current
+# state files and `comm`-diff the two. These four helpers collapse the
+# `<(filter "$base") <(filter "$cur") | sort -u` ritual to one call.
+#
+# Two shapes cover ~all of the in-tree callsites:
+#   *_field FIELD COL BASE CUR     records of the form: "FIELD value1 value2 …"
+#                                   (extract column COL where $1==FIELD)
+#   *_prefix PREFIX BASE CUR        records of the form: "PREFIX rest of line"
+#                                   (emit the full line; caller strips PREFIX)
+
+state_added_field() {
+  comm -13 \
+    <(awk -v f="$3" -v c="${4:-2}" '$1==f{print $c}' "$1" 2>/dev/null | sort -u) \
+    <(awk -v f="$3" -v c="${4:-2}" '$1==f{print $c}' "$2" 2>/dev/null | sort -u)
+}
+state_removed_field() {
+  comm -23 \
+    <(awk -v f="$3" -v c="${4:-2}" '$1==f{print $c}' "$1" 2>/dev/null | sort -u) \
+    <(awk -v f="$3" -v c="${4:-2}" '$1==f{print $c}' "$2" 2>/dev/null | sort -u)
+}
+state_added_prefix() {
+  comm -13 \
+    <(grep "^$3 " "$1" 2>/dev/null | sort -u) \
+    <(grep "^$3 " "$2" 2>/dev/null | sort -u)
+}
+state_removed_prefix() {
+  comm -23 \
+    <(grep "^$3 " "$1" 2>/dev/null | sort -u) \
+    <(grep "^$3 " "$2" 2>/dev/null | sort -u)
+}
+
+# --- flat-JSON field reader ----------------------------------------------
+# json_field FILE KEY — extract a string field from one-line flat JSON.
+# We only ever parse our own emitted JSON (manifest.json, suppress.token),
+# never untrusted input — that is what keeps jq off the Phase-1 dep list.
+json_field() {
+  awk -v k="$2" '
+    { if (match($0, "\"" k "\"[ ]*:[ ]*\"")) {
+        r = substr($0, RSTART + RLENGTH); q = index(r, "\"")
+        print substr(r, 1, q - 1); exit } }' "$1"
+}
+
+# kv_read FILE KEY — read first `KEY=VALUE` from a flat key=value file.
+kv_read() { awk -F= -v k="$2" '$1==k{print $2; exit}' "$1" 2>/dev/null; }
+
 # --- misc -----------------------------------------------------------------
 # require_cmd NAME -> 0 if present, 1 if not (never aborts; callers decide).
 require_cmd() { command -v "$1" >/dev/null 2>&1; }
