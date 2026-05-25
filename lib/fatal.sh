@@ -41,7 +41,7 @@ fatal_is_armed() {
 # The action is read from the signed host.conf (R3-3); only scope lives in the
 # armed-state file (it can merely broaden which signals trigger the already-
 # signed action, never change the action itself).
-_fatal_armed_scope() { awk -F= '$1=="scope"{print $2}' "$(fatal_armed_file)" 2>/dev/null | head -n1; }
+_fatal_armed_scope() { kv_read "$(fatal_armed_file)" scope; }
 
 # The deterministic freeze ruleset (C5): the §2.2 nft check regenerates this
 # byte-for-byte to recognise a legitimate freeze. Drops NEW outbound, keeps
@@ -71,10 +71,10 @@ _fatal_in_cooldown() {
   local cf hours last now sig
   cf=$(fatal_cooldown_file)
   [ -f "$cf" ] || return 1
-  sig=$(awk -F= '$1=="signal"{print $2}' "$cf" 2>/dev/null | head -n1)
+  sig=$(kv_read "$cf" signal)
   [ "$sig" = "$1" ] || return 1
   hours=$(cfg_get fatal_cooldown_hours 24)
-  last=$(awk -F= '$1=="epoch"{print $2}' "$cf" 2>/dev/null | head -n1)
+  last=$(kv_read "$cf" epoch)
   [ -n "$last" ] || return 1
   now=$(now_epoch)
   [ $(( now - last )) -lt $(( hours * 3600 )) ]
