@@ -108,27 +108,21 @@ input_devices_analyze() {
     esac
     _emit_input "new $desc attached since baseline: $(printf '%s' "$line" | sed 's/^usbhid //')" \
       "$line" "$token"
-  done <<< "$(comm -13 \
-      <(grep '^usbhid ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^usbhid ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" usbhid)"
 
   # New /sys/class/input event devices (allowlist token = device name).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     token=$(printf '%s' "$line" | sed 's/^inputdev //')
     _emit_input "new input event device since baseline: $token" "$line" "$token"
-  done <<< "$(comm -13 \
-      <(grep '^inputdev ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^inputdev ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" inputdev)"
 
   # New PS/2 serio input devices.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     token=$(printf '%s' "$line" | sed 's/^serio //')
     _emit_input "new PS/2 (serio) input device since baseline: $token" "$line" "$token"
-  done <<< "$(comm -13 \
-      <(grep '^serio ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^serio ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" serio)"
 
   # New kernel-log input registrations (R5-2 — catches a plug-attack-unplug).
   while IFS= read -r line; do
@@ -136,9 +130,7 @@ input_devices_analyze() {
     token=$(printf '%s' "$line" | sed 's/^kmsg_input //')
     _emit_input "kernel logged a new input device since baseline (may already be unplugged): $token" \
       "$line" "$token"
-  done <<< "$(comm -13 \
-      <(grep '^kmsg_input ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^kmsg_input ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" kmsg_input)"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

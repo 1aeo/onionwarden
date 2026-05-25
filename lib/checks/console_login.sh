@@ -65,9 +65,7 @@ console_login_analyze() {
     emit_finding "$CHECK_NAME" console_login "$sev" \
       "new local-console login on $tty by '$user' since baseline" \
       "absent" "$tty/$user" "$fatal"
-  done <<< "$(comm -13 \
-      <(grep '^console ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^console ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" console)"
 
   # R5-3: closed console sessions recorded in wtmp (`last`).
   while IFS= read -r line; do
@@ -77,9 +75,7 @@ console_login_analyze() {
     emit_finding "$CHECK_NAME" console_login "$sev" \
       "new console login in wtmp on $tty by '$user' (session may have closed) since baseline" \
       "absent" "$tty/$user" "$fatal"
-  done <<< "$(comm -13 \
-      <(grep '^wtmp_login ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^wtmp_login ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" wtmp_login)"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

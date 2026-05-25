@@ -90,9 +90,7 @@ nested_vm_analyze() {
     [ -n "$name" ] || continue
     emit_finding "$CHECK_NAME" guest_set CRIT \
       "new libvirt-managed guest since baseline: $name" "absent" "$name" false
-  done <<< "$(comm -13 \
-      <(awk '$1=="virshguest"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="virshguest"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" virshguest)"
 
   # Changed guest argv (-netdev) -> CRIT (a new exfil path).
   while IFS= read -r line; do

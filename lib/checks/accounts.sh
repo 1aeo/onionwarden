@@ -83,18 +83,14 @@ accounts_analyze() {
       emit_finding "$CHECK_NAME" uid0 CRIT \
         "new UID-0 account '$user' not in expected_uid0" "absent" "$user" true
     fi
-  done <<< "$(comm -13 \
-      <(awk '$1=="uid0"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="uid0"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" uid0)"
 
   # New empty-password accounts.
   while IFS= read -r user; do
     [ -n "$user" ] || continue
     emit_finding "$CHECK_NAME" empty_password CRIT \
       "account '$user' has an empty password field" "absent" "$user" false
-  done <<< "$(comm -13 \
-      <(awk '$1=="emptypw"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="emptypw"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" emptypw)"
 
   # sudo/admin group membership change.
   local bgrp cgrp

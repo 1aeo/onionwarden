@@ -98,17 +98,13 @@ scheduled_analyze() {
       emit_finding "$CHECK_NAME" systemd_units CRIT \
         "new systemd unit '$name' ($state) since baseline" "absent" "$name" false
     fi
-  done <<< "$(comm -13 \
-      <(awk '$1=="unitfile"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="unitfile"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" unitfile)"
   # Removed systemd unit-files.
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     emit_finding "$CHECK_NAME" systemd_units INFO \
       "systemd unit '$name' removed since baseline" "present" "absent" false
-  done <<< "$(comm -23 \
-      <(awk '$1=="unitfile"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="unitfile"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_removed_field "$base_file" "$cur_file" unitfile)"
 
   # New timers.
   while IFS= read -r name; do
@@ -120,9 +116,7 @@ scheduled_analyze() {
       emit_finding "$CHECK_NAME" systemd_units CRIT \
         "new timer '$name' since baseline" "absent" "$name" false
     fi
-  done <<< "$(comm -13 \
-      <(awk '$1=="timer"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="timer"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" timer)"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

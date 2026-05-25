@@ -82,9 +82,7 @@ snap_analyze() {
     [ -n "$path" ] || continue
     emit_finding "$CHECK_NAME" snap_suid CRIT \
       "new SUID binary inside /snap since baseline: $path" "absent" "$path" false
-  done <<< "$(comm -13 \
-      <(awk '$1=="snapsuid"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="snapsuid"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" snapsuid)"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then
