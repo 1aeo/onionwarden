@@ -168,7 +168,14 @@ json_field() {
 }
 
 # kv_read FILE KEY — read first `KEY=VALUE` from a flat key=value file.
-kv_read() { awk -F= -v k="$2" '$1==k{print $2; exit}' "$1" 2>/dev/null; }
+# VALUE may contain `=`; everything after the first `=` is preserved
+# (the old `-F=` split would truncate `KEY=a=b` to `a`).
+kv_read() {
+  awk -v k="$2" '
+    { p = k "="
+      if (substr($0, 1, length(p)) == p) { print substr($0, length(p) + 1); exit } }
+  ' "$1" 2>/dev/null
+}
 
 # --- misc -----------------------------------------------------------------
 # require_cmd NAME -> 0 if present, 1 if not (never aborts; callers decide).
