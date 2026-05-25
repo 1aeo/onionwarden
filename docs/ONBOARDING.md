@@ -28,6 +28,7 @@ own runbook (PLAN §6, §3.7).
 ## Prerequisites
 
 ### On the operator's laptop
+
 - A checkout of this repo (`git clone https://github.com/1aeo/onionwarden`).
 - `python3` (only used by the bundled Ed25519 fallback when OpenSSL Ed25519
   is unavailable; see `lib/ed25519.py`).
@@ -40,6 +41,7 @@ own runbook (PLAN §6, §3.7).
   private key. Signing happens off-box, by you, between phases.
 
 ### On the receiver
+
 - Receiver is healthy: `cron`, `onionwarden-receiver` running, per-host
   `events.log` paths in place. See [`receiver/RECEIVER.md`](../receiver/RECEIVER.md).
 - Authorized-keys file ready to accept a new restricted line for the
@@ -48,6 +50,7 @@ own runbook (PLAN §6, §3.7).
   open new firewall rules).
 
 ### On the target host
+
 - Ubuntu 24.04 or Debian 13 (tier-1 + tier-2 per PLAN §0.5). Other OSes
   will work in degraded mode but are not supported by this runbook.
 - Reachable over SSH, key-only, with a sudo-capable login.
@@ -58,9 +61,10 @@ own runbook (PLAN §6, §3.7).
   exposure yet; weakest is single-user/recovery boot accepting TOFU.
 
 ### Local artifacts the runbook expects per host
+
 By convention this runbook keeps per-host artifacts under `./hosts/`:
 
-```
+```text
 hosts/<HOST>.conf            # signed source of truth (PLAN §3.4 schema)
 hosts/<HOST>.conf.sig        # Ed25519 signature, operator key
 hosts/<HOST>.baseline/       # Phase-0 baseline candidate + manifest + .sig
@@ -142,6 +146,7 @@ You then:
    what you actually intend (PLAN §3.4: allowlists encode human intent,
    the baseline encodes actual state).
 4. Sign it off-box:
+
    ```sh
    ./bin/onionwarden sign sign \
      --key /path/to/operator.priv \
@@ -149,6 +154,7 @@ You then:
      --out  hosts/<HOST>.conf.sig
    mv hosts/<HOST>.conf.draft hosts/<HOST>.conf
    ```
+
 
 If you skipped this step because the host is a fresh install with no
 workload of its own, write `hosts/<HOST>.conf` by hand from
@@ -191,7 +197,7 @@ The receiver enforces the per-host pin (CRITIQUE_RECEIVER_R1 — a stolen
 key from host A cannot append to host B's `events.log`). The line the
 script prints looks like:
 
-```
+```text
 restrict,command="/opt/onionwarden/receiver/receiver-append.sh <HOST>" ssh-ed25519 AAAA... onionwarden@<HOST>
 ```
 
@@ -347,12 +353,14 @@ After `--install` and the first signed baseline (Step 5), confirm each:
 ## Troubleshooting
 
 ### `--check` reports "cannot SSH non-interactively"
+
 The script uses `-o BatchMode=yes`. Either your key isn't loaded into the
 agent, or the target prompts for a passphrase. Fix at the OS level
 (`ssh-add`, `~/.ssh/config`); the script never falls back to interactive
 prompts (we will not let an operator's typo'd password land in `events.log`).
 
 ### `--check` reports signature INVALID
+
 - Confirm `./onionwarden.pub` is the pubkey for the **operator key** you
   used to sign `hosts/<HOST>.conf` (it is easy to mix the fleet pubkey
   with an operator's personal pubkey).
@@ -362,6 +370,7 @@ prompts (we will not let an operator's typo'd password land in `events.log`).
   hosts/<HOST>.conf --out hosts/<HOST>.conf.sig`.
 
 ### First heartbeat does not appear in the receiver's `events.log`
+
 1. On target: `sudo /opt/onionwarden/bin/onionwarden run fast` exits 0?
 2. On target: `sudo cat /etc/onionwarden/host.conf | grep offbox_log_target`
    — is the receiver hostname correct?
@@ -373,6 +382,7 @@ prompts (we will not let an operator's typo'd password land in `events.log`).
    errors.
 
 ### Dead-man's switch round-trip never fires `stale-host`
+
 - Confirm the receiver's `verify-check` cron entry is installed (it is
   the thing that promotes silence to CRIT — see `receiver/RECEIVER.md`).
 - Confirm `deadman_provider` in `hosts/<HOST>.conf` is one of the
@@ -382,6 +392,7 @@ prompts (we will not let an operator's typo'd password land in `events.log`).
   `verify-check` cron is `*/10` you need at least 660 s.
 
 ### `--rollback` leaves files behind
+
 - Files might be `chattr +i` even after the recursive `chattr -i` if
   `CAP_LINUX_IMMUTABLE` is gated on the target. Re-run the rollback as a
   sudo-capable user with full capabilities, then `lsattr` to confirm.
@@ -390,6 +401,7 @@ prompts (we will not let an operator's typo'd password land in `events.log`).
   certainly want them for the post-mortem before deleting.
 
 ### `install.sh` reports "FS … — falling back to detection-only"
+
 Your install prefix is on a filesystem that does not support `chattr +i`
 (tmpfs, ZFS, overlayfs, NFS). The watchdog runs fine; it just loses the
 script-immutability layer (PLAN §3.6). For Phase 1 canaries this is
