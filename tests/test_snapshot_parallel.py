@@ -20,6 +20,7 @@ import pathlib
 import shutil
 import stat
 import subprocess
+import sys
 import time
 
 import pytest
@@ -203,14 +204,40 @@ def test_parallel_runs_byte_identical(fake_ssh, tmp_path):
     # etc.). We allow per-check skips only if BOTH sides genuinely differ.
     diffs = sorted(name for name in d1 if d1[name] != d2[name])
     # Explicit allowlist of collectors whose .current output legitimately
-    # varies between back-to-back runs:
-    #   profile.current         — records detected_at= wall-clock timestamp
-    #   process_ancestry.current — walks live /proc, varies as transient
-    #                             processes come and go (Linux); kept on the
-    #                             list so a Linux CI host doesn't flake.
-    # Anything else differing means the orchestration introduced non-
-    # determinism — fail loudly with the unexpected file names.
+    # varies between back-to-back runs. Each entry names the underlying source
+    # of nondeterminism — it must be a property of the *collector's input*,
+    # not of the orchestration. Anything else differing means the orchestration
+    # introduced non-determinism — fail loudly with the unexpected file names.
+    #
+    # Cross-platform entries:
+    #   profile.current         — records detected_at= wall-clock timestamp.
+    #   process_ancestry.current — walks live /proc on Linux; on macOS the
+    #                             collector short-circuits with a constant
+    #                             marker, so this entry is harmless there
+    #                             and useful for keeping Linux CI from flaking.
     ALLOWED_VARIABLE = {"profile.current", "process_ancestry.current"}
+    # Linux-only entries: these collectors short-circuit on macOS
+    # (`na no-systemctl` / `na no-journalctl` / no live /usr,/etc walks),
+    # so the names never appear in the macOS diff comparison. Adding them
+    # only on Linux makes the platform-dependency explicit:
+    #   filesystem.current      — `find /usr /etc /bin /sbin` walks live
+    #                             system dirs; on busy Linux CI runners,
+    #                             transient files (apt/dpkg locks, ld.so.cache
+    #                             rebuilds, tmp under /etc) appear/disappear
+    #                             between back-to-back runs.
+    #   scheduled.current       — `systemctl list-timers --all` output
+    #                             includes wall-clock "next"/"left"/"last"
+    #                             columns that re-render every invocation.
+    #   auth_log.current        — `journalctl -u ssh --since "-1h"` is a
+    #                             sliding wall-clock window; lines drop off
+    #                             the back as seconds tick, and new sshd
+    #                             noise can appear on a real Linux host.
+    if sys.platform.startswith("linux"):
+        ALLOWED_VARIABLE |= {
+            "filesystem.current",
+            "scheduled.current",
+            "auth_log.current",
+        }
     unexpected = [n for n in diffs if n not in ALLOWED_VARIABLE]
     assert not unexpected, (
         f"unexpected nondeterministic .current files between parallel runs "
