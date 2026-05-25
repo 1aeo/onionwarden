@@ -535,11 +535,53 @@ _verify() {
     ok "events.log shows recent activity for $HOST"
 
     step "Dead-man's switch round-trip (PLAN §3.7 first-arm checklist item 5)"
-    plan "ssh $SSH_TARGET 'sudo systemctl stop onionwarden-fast.timer || sudo crontab -l | grep -v onionwarden-run | sudo crontab -'"
+    local stop_cmd='sudo systemctl stop onionwarden-fast.timer 2>/dev/null || sudo crontab -l 2>/dev/null | grep -v onionwarden-run | sudo crontab -'
+    local restore_cmd='sudo systemctl start onionwarden-fast.timer 2>/dev/null || ( ( sudo crontab -l 2>/dev/null; echo "* * * * * /opt/onionwarden/bin/onionwarden run fast" ) | sudo crontab - )'
+    local check_cmd="grep -c stale-host /var/lib/onionwarden/data/${HOST}/events.log"
+
+    plan "ssh $SSH_TARGET '$stop_cmd'"
     plan "sleep $STALE_WINDOW  (wait $STALE_WINDOW s for receiver's verify-check to fire CRIT)"
-    plan "ssh $RECEIVER 'grep -c stale-host /var/lib/onionwarden/data/$HOST/events.log'  (expect > 0)"
-    plan "ssh $SSH_TARGET 'sudo systemctl start onionwarden-fast.timer || (sudo crontab -l 2>/dev/null; echo \"* * * * * /opt/onionwarden/bin/onionwarden run fast\") | sudo crontab -'"
+    plan "ssh $RECEIVER '$check_cmd'  (expect > 0)"
+    plan "ssh $SSH_TARGET '$restore_cmd'"
     warn "stale-window probe is destructive (pauses heartbeats) — re-run with --dry-run first to confirm steps"
+
+    if [ "$DRY_RUN" != 1 ]; then
+      # Trap so the timer/cron is restored even if the receiver grep or our
+      # sleep is interrupted; otherwise an aborted --verify leaves the
+      # watchdog disabled and the operator does not know.
+      local restored=0
+      _restore() {
+        [ "$restored" = 1 ] && return 0
+        restored=1
+        say "restoring heartbeat on $SSH_TARGET"
+        _ssh "$SSH_TARGET" "$restore_cmd" || warn "RESTORE FAILED — re-enable onionwarden-fast.timer or cron entry on $SSH_TARGET by hand"
+      }
+      trap _restore EXIT INT TERM
+
+      step "Pausing heartbeats on $SSH_TARGET"
+      _ssh "$SSH_TARGET" "$stop_cmd" || { EXITCODE=6 die "could not stop heartbeats on $SSH_TARGET"; }
+
+      step "Sleeping ${STALE_WINDOW}s for receiver verify-check to fire stale-host"
+      sleep "$STALE_WINDOW"
+
+      step "Inspecting receiver $RECEIVER for stale-host event"
+      _ssh_target_flags "$RECEIVER"
+      local hits
+      hits=$(ssh "${_SSH_FLAGS[@]}" "$check_cmd" 2>/dev/null || printf 0)
+      hits=${hits//[^0-9]/}
+      : "${hits:=0}"
+      if [ "$hits" -gt 0 ]; then
+        ok "receiver recorded $hits stale-host event(s) for $HOST"
+      else
+        fail "no stale-host event for $HOST in receiver events.log — deadman_provider not wired (PLAN §4)"
+        _restore
+        trap - EXIT INT TERM
+        EXITCODE=6 die "dead-man's switch verification failed"
+      fi
+
+      _restore
+      trap - EXIT INT TERM
+    fi
   else
     warn "no --receiver — skipping events.log + dead-man's switch round-trip"
   fi
