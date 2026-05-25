@@ -495,7 +495,12 @@ for f in "$OUT"/*.current; do
   if grep -q '^RAW: ' "$f" 2>/dev/null; then
     n=$(basename "$f" .current)
     grep '^RAW: ' "$f" | sed 's/^RAW: //' > "$OUT/raw/$n.raw"
-    grep -v '^RAW: ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    # `grep -v` exits 1 when every line matches (file is RAW-only); without
+    # the `|| :` guard the `&&` short-circuit would skip the mv and leave the
+    # RAW: lines in .current. We want unconditional removal regardless of
+    # whether any non-RAW lines remain.
+    grep -v '^RAW: ' "$f" > "$f.tmp" || :
+    mv "$f.tmp" "$f"
   fi
 done
 
