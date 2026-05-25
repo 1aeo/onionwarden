@@ -29,6 +29,9 @@ from conftest import ROOT, BASH
 SNAPSHOT_BIN = str(ROOT / "bin" / "onionwarden-snapshot")
 CHECKS_DIR = ROOT / "lib" / "checks"
 CHECK_NAMES = sorted(p.stem for p in CHECKS_DIR.glob("*.sh"))
+# Fail loudly if the glob discovered nothing — otherwise the parametrize'd and
+# loop-over-CHECK_NAMES tests below silently degrade to no-ops and pass.
+assert CHECK_NAMES, f"no checks discovered in {CHECKS_DIR} — glob 'lib/checks/*.sh' matched nothing"
 
 
 # ---------------------------------------------------------------------------
