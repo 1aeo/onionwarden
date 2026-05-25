@@ -76,26 +76,70 @@ warn()   { printf '  [warn] %s\n' "$*" >&2; }
 fail()   { printf '  [FAIL] %s\n' "$*" >&2; }
 plan()   { printf '  [plan] %s\n' "$*" >&2; }
 
-# run CMD...
-#   In dry-run, prints `[dry-run] would: <cmd>` and returns success. Otherwise
-#   executes via eval (so shell quoting in caller is honored).
-run() {
-  if [ "$DRY_RUN" = 1 ]; then
-    printf '  [dry-run] would: %s\n' "$*" >&2
-    return 0
-  fi
-  eval "$@"
+# _quote_arg STR
+#   Print STR with shell-friendly single-quoting if it contains whitespace or
+#   shell metacharacters; otherwise print it raw. Used only for the
+#   `[dry-run] would:` display lines so they look like the commands a human
+#   would copy-paste. Real execution always goes through an argv array.
+_quote_arg() {
+  local s=$1
+  case "$s" in
+    *[[:space:]\|\&\;\<\>\(\)\$\`\\\"\'\!\*\?\#\~]*|"")
+      printf "'%s'" "${s//\'/\'\\\'\'}"
+      ;;
+    *)
+      printf '%s' "$s"
+      ;;
+  esac
 }
 
-# capture CMD...
-#   Like run() but prints the stdout to terminal in non-dry-run. Used for
-#   transparent passthroughs like `onionwarden snapshot`.
-capture() {
+_format_cmd() {
+  local first=1 a
+  for a in "$@"; do
+    [ "$first" = 1 ] || printf ' '
+    first=0
+    _quote_arg "$a"
+  done
+}
+
+# run CMD ARG...
+#   In dry-run, prints `[dry-run] would: <cmd>` and returns success. Otherwise
+#   executes the argv directly (no eval / no shell re-parsing). Callers that
+#   need a remote shell command pass the command as a single argument to ssh.
+run() {
   if [ "$DRY_RUN" = 1 ]; then
-    printf '  [dry-run] would: %s\n' "$*" >&2
+    printf '  [dry-run] would: ' >&2
+    _format_cmd "$@" >&2
+    printf '\n' >&2
     return 0
   fi
-  eval "$@"
+  "$@"
+}
+
+# capture CMD ARG...
+#   Like run() but used for transparent passthroughs like `onionwarden snapshot`
+#   where the child's stdout/stderr should reach the user's terminal.
+capture() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '  [dry-run] would: ' >&2
+    _format_cmd "$@" >&2
+    printf '\n' >&2
+    return 0
+  fi
+  "$@"
+}
+
+# require_arg FLAG VALUE
+#   Validate that a long-option flag has a usable value. Used under `set -u`
+#   so that `--ssh-target` (no value) or `--ssh-target --verify host` give a
+#   clean usage error (exit 2) instead of an unbound-variable crash or
+#   accidentally consuming a subsequent flag as data.
+require_arg() {
+  local flag=$1
+  local val=${2-}
+  if [ -z "$val" ] || [ "${val:0:1}" = "-" ]; then
+    EXITCODE=2 die "$flag requires a value (got '${val}')"
+  fi
 }
 
 # --- arg parse ------------------------------------------------------------
@@ -114,13 +158,13 @@ while [ "$#" -gt 0 ]; do
     --verify)           _set_mode verify; shift ;;
     --rollback)         _set_mode rollback; shift ;;
 
-    --ssh-target)       SSH_TARGET=$2; shift 2 ;;
-    --receiver)         RECEIVER=$2; shift 2 ;;
-    --hosts-dir)        HOSTS_DIR=$2; shift 2 ;;
-    --pubkey)           PUBKEY=$2; shift 2 ;;
+    --ssh-target)       require_arg "$1" "${2-}"; SSH_TARGET=$2; shift 2 ;;
+    --receiver)         require_arg "$1" "${2-}"; RECEIVER=$2; shift 2 ;;
+    --hosts-dir)        require_arg "$1" "${2-}"; HOSTS_DIR=$2; shift 2 ;;
+    --pubkey)           require_arg "$1" "${2-}"; PUBKEY=$2; shift 2 ;;
     --with-sudo)        WITH_SUDO=1; shift ;;
-    --ssh-opt)          SSH_OPTS+=( "$2" ); shift 2 ;;
-    --stale-window)     STALE_WINDOW=$2; shift 2 ;;
+    --ssh-opt)          require_arg "$1" "${2-}"; SSH_OPTS+=( "$2" ); shift 2 ;;
+    --stale-window)     require_arg "$1" "${2-}"; STALE_WINDOW=$2; shift 2 ;;
     --no-chattr)        NO_CHATTR=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
 
@@ -147,26 +191,36 @@ HOST_CONF_SIG="$HOSTS_DIR/$HOST.conf.sig"
 BASELINE_DIR="$HOSTS_DIR/$HOST.baseline"
 
 # --- ssh helpers ----------------------------------------------------------
+# Populate the global _SSH_FLAGS array with the ssh flags + target derived
+# from USER@HOST:PORT. We use an array (rather than a space-joined string)
+# so callers can invoke `ssh "${_SSH_FLAGS[@]}" <remote-cmd>` without any
+# eval/word-splitting risk — important because cron payloads contain quotes.
+declare -a _SSH_FLAGS=()
 _ssh_target_flags() {
-  # Split USER@HOST:PORT into ssh args. PORT is optional.
   local t=$1 port=""
   case "$t" in
     *:*) port=${t##*:}; t=${t%:*} ;;
   esac
-  printf "%s" "-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
-  [ -n "$port" ] && printf " %s" "-p $port"
-  for o in ${SSH_OPTS[@]+"${SSH_OPTS[@]}"}; do
-    printf " %s" "-o $o"
-  done
-  printf " %s" "$t"
+  _SSH_FLAGS=( -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new )
+  [ -n "$port" ] && _SSH_FLAGS+=( -p "$port" )
+  if [ "${#SSH_OPTS[@]}" -gt 0 ]; then
+    local o
+    for o in "${SSH_OPTS[@]}"; do
+      _SSH_FLAGS+=( -o "$o" )
+    done
+  fi
+  _SSH_FLAGS+=( "$t" )
 }
 
 _ssh() {
-  # _ssh TARGET CMD...
-  local target=$1; shift
-  local flags
-  flags=$(_ssh_target_flags "$target")
-  run "ssh $flags '$*'"
+  # _ssh TARGET REMOTE_CMD
+  #   REMOTE_CMD is passed as a single argument to ssh, so the local shell
+  #   does not re-parse it. Quotes in the remote command (e.g. the cron
+  #   payload's `echo '* * * * * ...'`) survive intact.
+  local target=$1
+  local cmd=$2
+  _ssh_target_flags "$target"
+  run ssh "${_SSH_FLAGS[@]}" "$cmd"
 }
 
 # --- pre-flight checks (--check, and first stage of every other mode) ---
@@ -176,8 +230,8 @@ _preflight() {
 
   plan "ssh -o BatchMode=yes $SSH_TARGET 'true'  (non-interactive SSH)"
   if [ "$DRY_RUN" != 1 ]; then
-    local flags; flags=$(_ssh_target_flags "$SSH_TARGET")
-    if eval "ssh $flags true" >/dev/null 2>&1; then
+    _ssh_target_flags "$SSH_TARGET"
+    if ssh "${_SSH_FLAGS[@]}" true >/dev/null 2>&1; then
       ok "non-interactive SSH works"
     else
       fail "cannot SSH to $SSH_TARGET non-interactively"
@@ -187,8 +241,8 @@ _preflight() {
 
   plan "ssh $SSH_TARGET '. /etc/os-release; echo \$ID \$VERSION_ID'  (OS family)"
   if [ "$DRY_RUN" != 1 ]; then
-    local flags; flags=$(_ssh_target_flags "$SSH_TARGET")
-    local os; os=$(eval "ssh $flags '. /etc/os-release 2>/dev/null; printf \"%s %s\" \"\$ID\" \"\$VERSION_ID\"'" 2>/dev/null || printf 'unknown')
+    _ssh_target_flags "$SSH_TARGET"
+    local os; os=$(ssh "${_SSH_FLAGS[@]}" '. /etc/os-release 2>/dev/null; printf "%s %s" "$ID" "$VERSION_ID"' 2>/dev/null || printf 'unknown')
     case "$os" in
       "ubuntu 24.04"|"debian 13")  ok "OS supported: $os (tier-1 / tier-2)" ;;
       ubuntu*|debian*)             warn "OS '$os' is Ubuntu/Debian but not a tier-1/2 target (PLAN §0.5)" ;;
@@ -198,24 +252,32 @@ _preflight() {
 
   plan "ssh $SSH_TARGET 'sudo -n true'  (passwordless sudo)"
   if [ "$DRY_RUN" != 1 ]; then
-    local flags; flags=$(_ssh_target_flags "$SSH_TARGET")
-    if eval "ssh $flags 'sudo -n true'" >/dev/null 2>&1; then
+    _ssh_target_flags "$SSH_TARGET"
+    if ssh "${_SSH_FLAGS[@]}" 'sudo -n true' >/dev/null 2>&1; then
       ok "sudo -n works"
     else
-      warn "sudo -n not available — --install will require manual elevation"
+      case "$MODE" in
+        install|verify|rollback)
+          fail "sudo -n not available on $SSH_TARGET — --$MODE requires non-interactive sudo (no fallback)"
+          fails=$((fails+1))
+          ;;
+        *)
+          warn "sudo -n not available — --install/--verify/--rollback will refuse to run until passwordless sudo is configured"
+          ;;
+      esac
     fi
   fi
 
   plan "ssh $SSH_TARGET 'command -v cron python3 tcpdump bpftool'  (required tools)"
   if [ "$DRY_RUN" != 1 ]; then
-    local flags; flags=$(_ssh_target_flags "$SSH_TARGET")
+    _ssh_target_flags "$SSH_TARGET"
     local missing
-    missing=$(eval "ssh $flags '
+    missing=$(ssh "${_SSH_FLAGS[@]}" '
       m=
       for t in cron python3 tcpdump bpftool; do
-        command -v \$t >/dev/null 2>&1 || m=\"\$m \$t\"
+        command -v $t >/dev/null 2>&1 || m="$m $t"
       done
-      printf %s \"\$m\"'") || true
+      printf %s "$m"') || true
     if [ -z "${missing// /}" ]; then
       ok "cron, python3, tcpdump, bpftool all present"
     else
@@ -253,9 +315,9 @@ _preflight() {
   plan "verify SSH path target->receiver (forced-command append works from $SSH_TARGET)"
   if [ -n "$RECEIVER" ]; then
     if [ "$DRY_RUN" != 1 ]; then
-      local flags; flags=$(_ssh_target_flags "$SSH_TARGET")
+      _ssh_target_flags "$SSH_TARGET"
       local rcv; rcv=${RECEIVER#*@}; rcv=${rcv%%:*}
-      if eval "ssh $flags 'getent hosts $rcv >/dev/null 2>&1 || nslookup $rcv >/dev/null 2>&1'" >/dev/null 2>&1; then
+      if ssh "${_SSH_FLAGS[@]}" "getent hosts ${rcv} >/dev/null 2>&1 || nslookup ${rcv} >/dev/null 2>&1" >/dev/null 2>&1; then
         ok "receiver $rcv resolves from $SSH_TARGET"
       else
         warn "could not confirm receiver resolves from target — verify network path"
@@ -278,11 +340,13 @@ _draft_host_conf() {
   local snap_dir="$HOSTS_DIR/$HOST.snapshot"
   local draft="$HOSTS_DIR/$HOST.conf.draft"
 
-  run "mkdir -p '$HOSTS_DIR'"
+  run mkdir -p "$HOSTS_DIR"
   plan "onionwarden snapshot $SSH_TARGET --out $snap_dir$( [ "$WITH_SUDO" = 1 ] && printf ' --with-sudo' )"
-  local sudo_arg=""
-  [ "$WITH_SUDO" = 1 ] && sudo_arg="--with-sudo"
-  capture "'$_bin_dir/onionwarden' snapshot '$SSH_TARGET' --out '$snap_dir' $sudo_arg"
+  if [ "$WITH_SUDO" = 1 ]; then
+    capture "$_bin_dir/onionwarden" snapshot "$SSH_TARGET" --out "$snap_dir" --with-sudo
+  else
+    capture "$_bin_dir/onionwarden" snapshot "$SSH_TARGET" --out "$snap_dir"
+  fi
 
   plan "write draft host.conf to $draft"
   if [ "$DRY_RUN" != 1 ]; then
@@ -326,14 +390,14 @@ _install() {
   [ -f "$PUBKEY" ]        || [ "$DRY_RUN" = 1 ] || { EXITCODE=3 die "missing $PUBKEY — generate with 'onionwarden sign keygen' first"; }
 
   plan "rsync -a $REPO_ROOT/ $SSH_TARGET:/tmp/onionwarden-src/  (stage code tree)"
-  run "rsync -a --delete --exclude='.git' --exclude='hosts/' '$REPO_ROOT/' '$SSH_TARGET:/tmp/onionwarden-src/'"
+  run rsync -a --delete --exclude=.git --exclude=hosts/ "$REPO_ROOT/" "$SSH_TARGET:/tmp/onionwarden-src/"
 
   plan "scp $HOST_CONF_SRC $SSH_TARGET:/tmp/onionwarden-host.conf"
-  run "scp '$HOST_CONF_SRC' '$SSH_TARGET:/tmp/onionwarden-host.conf'"
+  run scp "$HOST_CONF_SRC" "$SSH_TARGET:/tmp/onionwarden-host.conf"
   plan "scp $HOST_CONF_SIG $SSH_TARGET:/tmp/onionwarden-host.conf.sig"
-  run "scp '$HOST_CONF_SIG' '$SSH_TARGET:/tmp/onionwarden-host.conf.sig'"
+  run scp "$HOST_CONF_SIG" "$SSH_TARGET:/tmp/onionwarden-host.conf.sig"
   plan "scp $PUBKEY $SSH_TARGET:/tmp/onionwarden.pub"
-  run "scp '$PUBKEY' '$SSH_TARGET:/tmp/onionwarden.pub'"
+  run scp "$PUBKEY" "$SSH_TARGET:/tmp/onionwarden.pub"
 
   local install_args="--answers /tmp/onionwarden-host.conf --pubkey /tmp/onionwarden.pub"
   [ "$NO_CHATTR" = 1 ] && install_args="$install_args --no-immutable"
@@ -353,9 +417,9 @@ _install() {
   step "Receiver wiring — events.log forced-command key"
   plan "ssh $SSH_TARGET 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub'"
   if [ "$DRY_RUN" != 1 ]; then
-    local flags; flags=$(_ssh_target_flags "$SSH_TARGET")
+    _ssh_target_flags "$SSH_TARGET"
     local publine
-    publine=$(eval "ssh $flags 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub'" 2>/dev/null || true)
+    publine=$(ssh "${_SSH_FLAGS[@]}" 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub' 2>/dev/null || true)
     if [ -n "$publine" ]; then
       ok "host-side per-host signing key already present"
       printf '\nPaste into the receiver authorized_keys (PLAN §4, CRITIQUE_RECEIVER_R1):\n  restrict,command="/opt/onionwarden/receiver/receiver-append.sh %s" %s\n\n' "$HOST" "$publine"
