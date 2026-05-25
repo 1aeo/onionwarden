@@ -201,14 +201,21 @@ def test_parallel_runs_byte_identical(fake_ssh, tmp_path):
     # timestamps. On macOS most collectors that succeed are time-independent
     # (clock prints `ntp_sync na_no_timedatectl`, profile prints constants,
     # etc.). We allow per-check skips only if BOTH sides genuinely differ.
-    diffs = [name for name in d1 if d1[name] != d2[name]]
-    # process_ancestry and any collector that walks live /proc can vary;
-    # we accept a small budget of timing-sensitive files and surface what
-    # they were if it's larger than that.
-    BUDGET = 5
-    assert len(diffs) <= BUDGET, \
-        ("more than {} per-check files differed between two parallel runs "
-         "(non-determinism in orchestration?): {}").format(BUDGET, diffs)
+    diffs = sorted(name for name in d1 if d1[name] != d2[name])
+    # Explicit allowlist of collectors whose .current output legitimately
+    # varies between back-to-back runs:
+    #   profile.current         — records detected_at= wall-clock timestamp
+    #   process_ancestry.current — walks live /proc, varies as transient
+    #                             processes come and go (Linux); kept on the
+    #                             list so a Linux CI host doesn't flake.
+    # Anything else differing means the orchestration introduced non-
+    # determinism — fail loudly with the unexpected file names.
+    ALLOWED_VARIABLE = {"profile.current", "process_ancestry.current"}
+    unexpected = [n for n in diffs if n not in ALLOWED_VARIABLE]
+    assert not unexpected, (
+        f"unexpected nondeterministic .current files between parallel runs "
+        f"(orchestration race?): {unexpected}"
+    )
 
 
 def test_serial_and_parallel_byte_identical_for_pure_checks(fake_ssh, tmp_path):
