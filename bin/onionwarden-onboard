@@ -1,0 +1,649 @@
+#!/usr/bin/env bash
+# bin/onionwarden-onboard — formal-onboarding wrapper for a single host.
+#
+# Walks the operator through the install + first-baseline + receiver-wiring +
+# heartbeat-verification flow that the README/PLAN spell out as a manual
+# sequence. The flow is faithful to PLAN §0–§7 and the §3.7 first-arm
+# checklist; the script never invents policy, only sequences the existing
+# tools (install.sh, onionwarden snapshot/baseline/sign).
+#
+# Modes (exactly one required):
+#   --check               Read-only pre-flight on the target host. No install.
+#   --draft-host-conf     Run snapshot + write a draft host.conf for review.
+#   --install             Full install. Assumes the operator-signed host.conf
+#                         and signed baseline manifest are ready locally.
+#   --verify              Post-install verification only. Round-trips a
+#                         heartbeat through the receiver and prints the
+#                         first-arm checklist progress for this host.
+#   --rollback            Stop timers, remove /opt/onionwarden + /etc/onionwarden
+#                         on the target, restore prior state.
+#
+# Positional:
+#   HOST                  short host_id (must match host.conf:host_id).
+#                         Used to locate hosts/<HOST>.conf and as the SSH
+#                         target unless --ssh-target overrides.
+#
+# Common flags:
+#   --ssh-target USER@H[:P]   SSH target for the host (default: HOST).
+#   --receiver USER@H[:P]     Receiver SSH target (default: from .env or hosts/<HOST>.conf).
+#   --hosts-dir DIR           Where hosts/<HOST>.conf lives (default: ./hosts).
+#   --pubkey FILE             Fleet pubkey path (default: ./onionwarden.pub).
+#   --with-sudo               Use sudo -n on target for snapshot (PLAN §3 — opt-in).
+#   --ssh-opt OPT             Extra ssh -o option; repeatable.
+#   --stale-window SECONDS    Heartbeat-stop window for --verify (default 240 = 3 missed 1-min beats + slack).
+#   --no-chattr               Pass --no-immutable to install.sh (testing only; PLAN §3.6 default ON).
+#   --dry-run                 Print actions; touch nothing locally or remotely.
+#   --help, --version
+#
+# Exit codes:
+#   0  success                  4  pre-flight failed (host not ready)
+#   1  generic / usage error    5  signature verify failed
+#   2  flag/arg error           6  receiver round-trip failed
+#   3  missing local artifact   7  rollback partial
+#
+# This script is the *operator's* path. It never auto-signs anything, never
+# auto-arms fatal_action, and never bypasses §3.7 — it just removes the
+# typo-prone manual steps from the formal-onboarding sequence.
+set -euo pipefail
+
+PROG=$(basename "$0")
+VERSION_TAG="onionwarden-onboard/1"
+
+# Resolve paths relative to the script so `onionwarden-onboard` works from
+# either a repo checkout or /opt/onionwarden.
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$_bin_dir/.." && pwd)
+
+MODE=""
+HOST=""
+SSH_TARGET=""
+RECEIVER=""
+HOSTS_DIR=""
+PUBKEY=""
+WITH_SUDO=0
+DRY_RUN=0
+NO_CHATTR=0
+STALE_WINDOW=240
+SSH_OPTS=()
+
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+die()    { printf '%s: %s\n' "$PROG" "$*" >&2; exit "${EXITCODE:-1}"; }
+say()    { printf '%s: %s\n' "$PROG" "$*" >&2; }
+step()   { printf '\n== %s ==\n' "$*" >&2; }
+ok()     { printf '  [ok]   %s\n' "$*" >&2; }
+warn()   { printf '  [warn] %s\n' "$*" >&2; }
+fail()   { printf '  [FAIL] %s\n' "$*" >&2; }
+plan()   { printf '  [plan] %s\n' "$*" >&2; }
+
+# _quote_arg STR
+#   Print STR with shell-friendly single-quoting if it contains whitespace or
+#   shell metacharacters; otherwise print it raw. Used only for the
+#   `[dry-run] would:` display lines so they look like the commands a human
+#   would copy-paste. Real execution always goes through an argv array.
+_quote_arg() {
+  local s=$1
+  case "$s" in
+    *[[:space:]\|\&\;\<\>\(\)\$\`\\\"\'\!\*\?\#\~]*|"")
+      printf "'%s'" "${s//\'/\'\\\'\'}"
+      ;;
+    *)
+      printf '%s' "$s"
+      ;;
+  esac
+}
+
+_format_cmd() {
+  local first=1 a
+  for a in "$@"; do
+    [ "$first" = 1 ] || printf ' '
+    first=0
+    _quote_arg "$a"
+  done
+}
+
+# run CMD ARG...
+#   In dry-run, prints `[dry-run] would: <cmd>` and returns success. Otherwise
+#   executes the argv directly (no eval / no shell re-parsing). Callers that
+#   need a remote shell command pass the command as a single argument to ssh.
+run() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '  [dry-run] would: ' >&2
+    _format_cmd "$@" >&2
+    printf '\n' >&2
+    return 0
+  fi
+  "$@"
+}
+
+# capture CMD ARG...
+#   Like run() but used for transparent passthroughs like `onionwarden snapshot`
+#   where the child's stdout/stderr should reach the user's terminal.
+capture() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '  [dry-run] would: ' >&2
+    _format_cmd "$@" >&2
+    printf '\n' >&2
+    return 0
+  fi
+  "$@"
+}
+
+# require_arg FLAG VALUE
+#   Validate that a long-option flag has a usable value. Used under `set -u`
+#   so that `--ssh-target` (no value) or `--ssh-target --verify host` give a
+#   clean usage error (exit 2) instead of an unbound-variable crash or
+#   accidentally consuming a subsequent flag as data.
+require_arg() {
+  local flag=$1
+  local val=${2-}
+  if [ -z "$val" ] || [ "${val:0:1}" = "-" ]; then
+    EXITCODE=2 die "$flag requires a value (got '${val}')"
+  fi
+}
+
+# --- arg parse ------------------------------------------------------------
+_set_mode() {
+  if [ -n "$MODE" ]; then
+    EXITCODE=2 die "modes are mutually exclusive: already set to --$MODE, refused --$1"
+  fi
+  MODE=$1
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check)            _set_mode check; shift ;;
+    --draft-host-conf)  _set_mode draft-host-conf; shift ;;
+    --install)          _set_mode install; shift ;;
+    --verify)           _set_mode verify; shift ;;
+    --rollback)         _set_mode rollback; shift ;;
+
+    --ssh-target)       require_arg "$1" "${2-}"; SSH_TARGET=$2; shift 2 ;;
+    --receiver)         require_arg "$1" "${2-}"; RECEIVER=$2; shift 2 ;;
+    --hosts-dir)        require_arg "$1" "${2-}"; HOSTS_DIR=$2; shift 2 ;;
+    --pubkey)           require_arg "$1" "${2-}"; PUBKEY=$2; shift 2 ;;
+    --with-sudo)        WITH_SUDO=1; shift ;;
+    --ssh-opt)          require_arg "$1" "${2-}"; SSH_OPTS+=( "$2" ); shift 2 ;;
+    --stale-window)     require_arg "$1" "${2-}"; STALE_WINDOW=$2; shift 2 ;;
+    --no-chattr)        NO_CHATTR=1; shift ;;
+    --dry-run)          DRY_RUN=1; shift ;;
+
+    -h|--help)          usage 0 ;;
+    --version)          printf '%s\n' "$VERSION_TAG"; exit 0 ;;
+
+    --) shift; break ;;
+    -*) EXITCODE=2 die "unknown option: $1 (try --help)" ;;
+    *)
+      [ -z "$HOST" ] || { EXITCODE=2 die "only one HOST may be given (saw '$HOST' and '$1')"; }
+      HOST=$1; shift ;;
+  esac
+done
+
+[ -n "$MODE" ] || { EXITCODE=2 die "exactly one mode required: --check|--draft-host-conf|--install|--verify|--rollback"; }
+[ -n "$HOST" ] || { EXITCODE=2 die "missing HOST positional"; }
+
+# Defaults that depend on parsed flags.
+[ -n "$SSH_TARGET" ] || SSH_TARGET=$HOST
+[ -n "$HOSTS_DIR"  ] || HOSTS_DIR="$REPO_ROOT/hosts"
+[ -n "$PUBKEY"     ] || PUBKEY="$REPO_ROOT/onionwarden.pub"
+HOST_CONF_SRC="$HOSTS_DIR/$HOST.conf"
+HOST_CONF_SIG="$HOSTS_DIR/$HOST.conf.sig"
+BASELINE_DIR="$HOSTS_DIR/$HOST.baseline"
+
+# _read_env_var FILE VAR
+#   Read `VAR=value` from FILE, stripping shell-style comments + surrounding
+#   whitespace and surrounding quotes. Treats <CHANGE-ME-...> placeholders
+#   as unset so a freshly-copied .env.example does not appear "configured".
+_read_env_var() {
+  local file=$1 var=$2 val
+  [ -f "$file" ] || return 1
+  val=$(awk -F= -v key="$var" '
+    $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      sub(/^"|"$/, ""); sub(/^'\''|'\''$/, "")
+      sub(/[[:space:]]+$/, "")
+      print
+      exit
+    }' "$file" 2>/dev/null) || return 1
+  case "$val" in ""|*CHANGE-ME*) return 1 ;; esac
+  printf '%s' "$val"
+}
+
+# _resolve_receiver
+#   Populate RECEIVER from .env (ONIONWARDEN_RECEIVER_USER/HOST/PORT) or
+#   from hosts/<HOST>.conf (offbox_log_target = "user@host:path") when the
+#   operator did not pass --receiver. Returns 0 on success, 1 if still
+#   unset. Idempotent: a non-empty RECEIVER is left alone.
+_resolve_receiver() {
+  [ -n "$RECEIVER" ] && return 0
+
+  local env_file="$REPO_ROOT/.env" r_user r_host r_port
+  r_user=$(_read_env_var "$env_file" ONIONWARDEN_RECEIVER_USER) || r_user=""
+  r_host=$(_read_env_var "$env_file" ONIONWARDEN_RECEIVER_HOST) || r_host=""
+  r_port=$(_read_env_var "$env_file" ONIONWARDEN_RECEIVER_PORT) || r_port=""
+  if [ -n "$r_user" ] && [ -n "$r_host" ]; then
+    RECEIVER="${r_user}@${r_host}"
+    [ -n "$r_port" ] && RECEIVER="${RECEIVER}:${r_port}"
+    return 0
+  fi
+
+  if [ -f "$HOST_CONF_SRC" ]; then
+    # offbox_log_target = "user@host:path"  →  extract user@host
+    local target
+    target=$(awk -F= '
+      /^[[:space:]]*offbox_log_target[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, "")
+        sub(/^"|"$/, ""); sub(/[[:space:]]*#.*$/, "")
+        print; exit
+      }' "$HOST_CONF_SRC" 2>/dev/null)
+    if [ -n "${target:-}" ]; then
+      local sshpart=${target%:*}
+      if [ -n "$sshpart" ] && [[ "$sshpart" == *@* ]]; then
+        RECEIVER="$sshpart"
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+# Resolve RECEIVER as early as possible so every mode sees a consistent
+# value. For --install / --verify a missing receiver is fatal: receiver-side
+# round-trip verification is the whole point of those modes per PLAN §4 /
+# §3.7 item 5, and silent skipping is what CodeRabbit flagged.
+_resolve_receiver || true
+case "$MODE" in
+  install|verify)
+    [ -n "$RECEIVER" ] || {
+      EXITCODE=4 die "no --receiver and could not derive one from $REPO_ROOT/.env (ONIONWARDEN_RECEIVER_USER/HOST) or $HOST_CONF_SRC (offbox_log_target); pass --receiver USER@HOST[:PORT]"
+    }
+    ;;
+esac
+
+# --- ssh helpers ----------------------------------------------------------
+# Populate the global _SSH_FLAGS array with the ssh flags + target derived
+# from USER@HOST:PORT. We use an array (rather than a space-joined string)
+# so callers can invoke `ssh "${_SSH_FLAGS[@]}" <remote-cmd>` without any
+# eval/word-splitting risk — important because cron payloads contain quotes.
+declare -a _SSH_FLAGS=()
+_ssh_target_flags() {
+  local t=$1 port=""
+  case "$t" in
+    *:*) port=${t##*:}; t=${t%:*} ;;
+  esac
+  _SSH_FLAGS=( -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new )
+  [ -n "$port" ] && _SSH_FLAGS+=( -p "$port" )
+  if [ "${#SSH_OPTS[@]}" -gt 0 ]; then
+    local o
+    for o in "${SSH_OPTS[@]}"; do
+      _SSH_FLAGS+=( -o "$o" )
+    done
+  fi
+  _SSH_FLAGS+=( "$t" )
+}
+
+_ssh() {
+  # _ssh TARGET REMOTE_CMD
+  #   REMOTE_CMD is passed as a single argument to ssh, so the local shell
+  #   does not re-parse it. Quotes in the remote command (e.g. the cron
+  #   payload's `echo '* * * * * ...'`) survive intact.
+  local target=$1
+  local cmd=$2
+  _ssh_target_flags "$target"
+  run ssh "${_SSH_FLAGS[@]}" "$cmd"
+}
+
+# --- pre-flight checks (--check, and first stage of every other mode) ---
+_preflight() {
+  step "Pre-flight on $SSH_TARGET (host_id=$HOST)"
+  local fails=0
+
+  plan "ssh -o BatchMode=yes $SSH_TARGET 'true'  (non-interactive SSH)"
+  if [ "$DRY_RUN" != 1 ]; then
+    _ssh_target_flags "$SSH_TARGET"
+    if ssh "${_SSH_FLAGS[@]}" true >/dev/null 2>&1; then
+      ok "non-interactive SSH works"
+    else
+      fail "cannot SSH to $SSH_TARGET non-interactively"
+      fails=$((fails+1))
+    fi
+  fi
+
+  plan "ssh $SSH_TARGET '. /etc/os-release; echo \$ID \$VERSION_ID'  (OS family)"
+  if [ "$DRY_RUN" != 1 ]; then
+    _ssh_target_flags "$SSH_TARGET"
+    local os; os=$(ssh "${_SSH_FLAGS[@]}" '. /etc/os-release 2>/dev/null; printf "%s %s" "$ID" "$VERSION_ID"' 2>/dev/null || printf 'unknown')
+    case "$os" in
+      "ubuntu 24.04"|"debian 13")  ok "OS supported: $os (tier-1 / tier-2)" ;;
+      ubuntu*|debian*)             warn "OS '$os' is Ubuntu/Debian but not a tier-1/2 target (PLAN §0.5)" ;;
+      *)                           fail "OS '$os' is not Ubuntu/Debian — refusing to install"; fails=$((fails+1)) ;;
+    esac
+  fi
+
+  plan "ssh $SSH_TARGET 'sudo -n true'  (passwordless sudo)"
+  if [ "$DRY_RUN" != 1 ]; then
+    _ssh_target_flags "$SSH_TARGET"
+    if ssh "${_SSH_FLAGS[@]}" 'sudo -n true' >/dev/null 2>&1; then
+      ok "sudo -n works"
+    else
+      case "$MODE" in
+        install|verify|rollback)
+          fail "sudo -n not available on $SSH_TARGET — --$MODE requires non-interactive sudo (no fallback)"
+          fails=$((fails+1))
+          ;;
+        *)
+          warn "sudo -n not available — --install/--verify/--rollback will refuse to run until passwordless sudo is configured"
+          ;;
+      esac
+    fi
+  fi
+
+  plan "ssh $SSH_TARGET 'command -v cron python3 tcpdump bpftool'  (required tools)"
+  if [ "$DRY_RUN" != 1 ]; then
+    _ssh_target_flags "$SSH_TARGET"
+    local missing
+    missing=$(ssh "${_SSH_FLAGS[@]}" '
+      m=
+      for t in cron python3 tcpdump bpftool; do
+        command -v $t >/dev/null 2>&1 || m="$m $t"
+      done
+      printf %s "$m"') || true
+    if [ -z "${missing// /}" ]; then
+      ok "cron, python3, tcpdump, bpftool all present"
+    else
+      warn "missing tools on target: $missing (some checks degrade to N/A; PLAN §0.2)"
+    fi
+  fi
+
+  plan "verify hosts/$HOST.conf exists and is signed"
+  if [ -f "$HOST_CONF_SRC" ] || [ "$DRY_RUN" = 1 ]; then
+    ok "found $HOST_CONF_SRC"
+  else
+    fail "missing $HOST_CONF_SRC (write one from .env.example first; see docs/ONBOARDING.md)"
+    fails=$((fails+1))
+  fi
+  if [ -f "$HOST_CONF_SIG" ] || [ "$DRY_RUN" = 1 ]; then
+    if [ -f "$PUBKEY" ] || [ "$DRY_RUN" = 1 ]; then
+      plan "onionwarden sign verify --pub $PUBKEY --file $HOST_CONF_SRC --sig $HOST_CONF_SIG"
+      if [ "$DRY_RUN" != 1 ]; then
+        if "$_bin_dir/onionwarden" sign verify --pub "$PUBKEY" \
+             --file "$HOST_CONF_SRC" --sig "$HOST_CONF_SIG" >/dev/null 2>&1; then
+          ok "host.conf signature OK"
+        else
+          fail "host.conf signature INVALID — refuse to install (PLAN §3.5)"
+          fails=$((fails+1))
+        fi
+      fi
+    else
+      fail "pubkey $PUBKEY not found — cannot verify signature"
+      fails=$((fails+1))
+    fi
+  else
+    warn "no $HOST_CONF_SIG — --install will refuse until signed off-box (PLAN §3.5)"
+  fi
+
+  plan "verify SSH path target->receiver (forced-command append works from $SSH_TARGET)"
+  if [ -n "$RECEIVER" ]; then
+    if [ "$DRY_RUN" != 1 ]; then
+      _ssh_target_flags "$SSH_TARGET"
+      local rcv; rcv=${RECEIVER#*@}; rcv=${rcv%%:*}
+      if ssh "${_SSH_FLAGS[@]}" "getent hosts ${rcv} >/dev/null 2>&1 || nslookup ${rcv} >/dev/null 2>&1" >/dev/null 2>&1; then
+        ok "receiver $rcv resolves from $SSH_TARGET"
+      else
+        warn "could not confirm receiver resolves from target — verify network path"
+      fi
+    fi
+  else
+    warn "no --receiver given and none in hosts/$HOST.conf — receiver path unverified"
+  fi
+
+  if [ "$fails" -gt 0 ]; then
+    EXITCODE=4 die "pre-flight failed ($fails issue(s))"
+  fi
+  ok "pre-flight clean"
+}
+
+# --- draft host.conf ------------------------------------------------------
+_draft_host_conf() {
+  step "Draft host.conf for $HOST via read-only snapshot"
+
+  local snap_dir="$HOSTS_DIR/$HOST.snapshot"
+  local draft="$HOSTS_DIR/$HOST.conf.draft"
+
+  run mkdir -p "$HOSTS_DIR"
+  plan "onionwarden snapshot $SSH_TARGET --out $snap_dir$( [ "$WITH_SUDO" = 1 ] && printf ' --with-sudo' )"
+  if [ "$WITH_SUDO" = 1 ]; then
+    capture "$_bin_dir/onionwarden" snapshot "$SSH_TARGET" --out "$snap_dir" --with-sudo
+  else
+    capture "$_bin_dir/onionwarden" snapshot "$SSH_TARGET" --out "$snap_dir"
+  fi
+
+  plan "write draft host.conf to $draft"
+  if [ "$DRY_RUN" != 1 ]; then
+    cp "$REPO_ROOT/.env.example" "$draft"
+    {
+      printf '\n# --- auto-suggested values from snapshot %s ---\n' "$snap_dir"
+      printf 'host_id            = "%s"\n' "$HOST"
+      if [ -f "$snap_dir/profile.state" ]; then
+        local role
+        role=$(awk -F= '/^role[[:space:]]*=/ { gsub(/[" ]/,""); print $2; exit }' "$snap_dir/profile.state" 2>/dev/null)
+        [ -n "${role:-}" ] && printf 'role               = "%s"   # suggested from profile.state\n' "$role"
+      fi
+      printf '# Review every CHANGE-ME, then sign off-box:\n'
+      printf '#   onionwarden sign sign --key /path/to/operator.priv --file %s --out %s\n' "$draft" "$HOST_CONF_SIG"
+      printf '# Then rename: mv %s %s\n' "$draft" "$HOST_CONF_SRC"
+    } >> "$draft"
+  fi
+
+  ok "draft written: $draft"
+  cat >&2 <<EOF
+
+Next steps (manual):
+  1) Edit $draft — fill every CHANGE-ME (ntfy_url, deadman_url, offbox_log_target, email_to).
+  2) Review the snapshot under $snap_dir against the draft — confirm expected_lan_ports,
+     UID-0 set, expected_admins reflect intent (PLAN §5 bootstrap).
+  3) Sign off-box with operator key:
+       onionwarden sign sign --key <priv> --file $draft --out $HOST_CONF_SIG
+  4) Rename: mv $draft $HOST_CONF_SRC
+  5) Re-run: $PROG --install $HOST
+EOF
+}
+
+# --- install --------------------------------------------------------------
+_install() {
+  _preflight
+
+  step "Install onionwarden on $SSH_TARGET"
+
+  [ -f "$HOST_CONF_SRC" ] || [ "$DRY_RUN" = 1 ] || { EXITCODE=3 die "missing $HOST_CONF_SRC — run --draft-host-conf first"; }
+  [ -f "$HOST_CONF_SIG" ] || [ "$DRY_RUN" = 1 ] || { EXITCODE=3 die "missing $HOST_CONF_SIG — sign off-box first (PLAN §3.5)"; }
+  [ -f "$PUBKEY" ]        || [ "$DRY_RUN" = 1 ] || { EXITCODE=3 die "missing $PUBKEY — generate with 'onionwarden sign keygen' first"; }
+
+  plan "rsync -a $REPO_ROOT/ $SSH_TARGET:/tmp/onionwarden-src/  (stage code tree)"
+  run rsync -a --delete --exclude=.git --exclude=hosts/ "$REPO_ROOT/" "$SSH_TARGET:/tmp/onionwarden-src/"
+
+  plan "scp $HOST_CONF_SRC $SSH_TARGET:/tmp/onionwarden-host.conf"
+  run scp "$HOST_CONF_SRC" "$SSH_TARGET:/tmp/onionwarden-host.conf"
+  plan "scp $HOST_CONF_SIG $SSH_TARGET:/tmp/onionwarden-host.conf.sig"
+  run scp "$HOST_CONF_SIG" "$SSH_TARGET:/tmp/onionwarden-host.conf.sig"
+  plan "scp $PUBKEY $SSH_TARGET:/tmp/onionwarden.pub"
+  run scp "$PUBKEY" "$SSH_TARGET:/tmp/onionwarden.pub"
+
+  local install_args="--answers /tmp/onionwarden-host.conf --pubkey /tmp/onionwarden.pub"
+  [ "$NO_CHATTR" = 1 ] && install_args="$install_args --no-immutable"
+  plan "ssh $SSH_TARGET 'sudo bash /tmp/onionwarden-src/install.sh $install_args'"
+  _ssh "$SSH_TARGET" "sudo bash /tmp/onionwarden-src/install.sh $install_args"
+
+  plan "ssh $SSH_TARGET 'sudo install -m0600 /tmp/onionwarden-host.conf.sig /etc/onionwarden/host.conf.sig'"
+  _ssh "$SSH_TARGET" "sudo install -m0600 /tmp/onionwarden-host.conf.sig /etc/onionwarden/host.conf.sig"
+
+  plan "ssh $SSH_TARGET 'sudo crontab -l 2>/dev/null | grep -q onionwarden-run || (sudo crontab -l 2>/dev/null; echo \"* * * * * /opt/onionwarden/bin/onionwarden run fast\") | sudo crontab -'"
+  _ssh "$SSH_TARGET" "sudo crontab -l 2>/dev/null | grep -q onionwarden-run || (sudo crontab -l 2>/dev/null; echo '* * * * * /opt/onionwarden/bin/onionwarden run fast') | sudo crontab -"
+
+  # Push the target's per-host SSH key out to the receiver authorized_keys.
+  # The script does NOT generate the key itself (the operator owns key custody);
+  # it asks the target to print its existing ed25519 public half and prints
+  # the authorized_keys line for the operator to paste into the receiver.
+  step "Receiver wiring — events.log forced-command key"
+  plan "ssh $SSH_TARGET 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub'"
+  if [ "$DRY_RUN" != 1 ]; then
+    _ssh_target_flags "$SSH_TARGET"
+    local publine
+    publine=$(ssh "${_SSH_FLAGS[@]}" 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub' 2>/dev/null || true)
+    if [ -n "$publine" ]; then
+      ok "host-side per-host signing key already present"
+      printf '\nPaste into the receiver authorized_keys (PLAN §4, CRITIQUE_RECEIVER_R1):\n  restrict,command="/opt/onionwarden/receiver/receiver-append.sh %s" %s\n\n' "$HOST" "$publine"
+    else
+      warn "no per-host offbox key on target — generate now and paste pub line into receiver authorized_keys"
+      plan "ssh $SSH_TARGET 'sudo ssh-keygen -t ed25519 -N \"\" -f /etc/onionwarden/keys/offbox_ed25519 -C onionwarden@$HOST'"
+    fi
+  fi
+
+  step "dispatch_at_install — first run + first heartbeat"
+  plan "ssh $SSH_TARGET 'sudo /opt/onionwarden/bin/onionwarden run fast'"
+  _ssh "$SSH_TARGET" "sudo /opt/onionwarden/bin/onionwarden run fast"
+  ok "install complete (bootstrapping state — sign + push the first baseline next)"
+
+  cat >&2 <<EOF
+
+NEXT (manual — first baseline; PLAN §5):
+  ssh $SSH_TARGET 'sudo /opt/onionwarden/bin/onionwarden baseline collect'
+  scp $SSH_TARGET:/var/lib/onionwarden/baseline.candidate/ $BASELINE_DIR/
+  onionwarden baseline diff --baseline <prev> --candidate $BASELINE_DIR
+  onionwarden sign sign --key <priv> --file $BASELINE_DIR/manifest.json
+  scp $BASELINE_DIR/manifest.json{,.sig} $SSH_TARGET:/var/lib/onionwarden/baseline/
+  $PROG --verify $HOST
+
+EOF
+}
+
+# --- verify ---------------------------------------------------------------
+_verify() {
+  step "Post-install verification for $HOST"
+
+  plan "ssh $SSH_TARGET 'sudo systemctl is-enabled --quiet onionwarden-fast.timer || (crontab -l | grep -q onionwarden-run)'"
+  _ssh "$SSH_TARGET" "sudo systemctl is-enabled --quiet onionwarden-fast.timer || (crontab -l | grep -q onionwarden-run)"
+  ok "watchdog timer / cron entry present"
+
+  plan "ssh $SSH_TARGET 'sudo /opt/onionwarden/bin/onionwarden run fast'  (force a heartbeat)"
+  _ssh "$SSH_TARGET" "sudo /opt/onionwarden/bin/onionwarden run fast"
+
+  if [ -n "$RECEIVER" ]; then
+    plan "ssh $RECEIVER 'tail -n3 /var/lib/onionwarden/data/$HOST/events.log'"
+    _ssh "$RECEIVER" "tail -n3 /var/lib/onionwarden/data/$HOST/events.log"
+    ok "events.log shows recent activity for $HOST"
+
+    step "Dead-man's switch round-trip (PLAN §3.7 first-arm checklist item 5)"
+    local stop_cmd='sudo systemctl stop onionwarden-fast.timer 2>/dev/null || sudo crontab -l 2>/dev/null | grep -v onionwarden-run | sudo crontab -'
+    local restore_cmd='sudo systemctl start onionwarden-fast.timer 2>/dev/null || ( ( sudo crontab -l 2>/dev/null; echo "* * * * * /opt/onionwarden/bin/onionwarden run fast" ) | sudo crontab - )'
+    local check_cmd="grep -c stale-host /var/lib/onionwarden/data/${HOST}/events.log"
+
+    plan "ssh $SSH_TARGET '$stop_cmd'"
+    plan "sleep $STALE_WINDOW  (wait $STALE_WINDOW s for receiver's verify-check to fire CRIT)"
+    plan "ssh $RECEIVER '$check_cmd'  (expect > 0)"
+    plan "ssh $SSH_TARGET '$restore_cmd'"
+    warn "stale-window probe is destructive (pauses heartbeats) — re-run with --dry-run first to confirm steps"
+
+    if [ "$DRY_RUN" != 1 ]; then
+      # Trap so the timer/cron is restored even if the receiver grep or our
+      # sleep is interrupted; otherwise an aborted --verify leaves the
+      # watchdog disabled and the operator does not know.
+      local restored=0
+      _restore() {
+        [ "$restored" = 1 ] && return 0
+        restored=1
+        say "restoring heartbeat on $SSH_TARGET"
+        _ssh "$SSH_TARGET" "$restore_cmd" || warn "RESTORE FAILED — re-enable onionwarden-fast.timer or cron entry on $SSH_TARGET by hand"
+      }
+      trap _restore EXIT INT TERM
+
+      step "Pausing heartbeats on $SSH_TARGET"
+      _ssh "$SSH_TARGET" "$stop_cmd" || { EXITCODE=6 die "could not stop heartbeats on $SSH_TARGET"; }
+
+      step "Sleeping ${STALE_WINDOW}s for receiver verify-check to fire stale-host"
+      sleep "$STALE_WINDOW"
+
+      step "Inspecting receiver $RECEIVER for stale-host event"
+      _ssh_target_flags "$RECEIVER"
+      local hits
+      hits=$(ssh "${_SSH_FLAGS[@]}" "$check_cmd" 2>/dev/null || printf 0)
+      hits=${hits//[^0-9]/}
+      : "${hits:=0}"
+      if [ "$hits" -gt 0 ]; then
+        ok "receiver recorded $hits stale-host event(s) for $HOST"
+      else
+        fail "no stale-host event for $HOST in receiver events.log — deadman_provider not wired (PLAN §4)"
+        _restore
+        trap - EXIT INT TERM
+        EXITCODE=6 die "dead-man's switch verification failed"
+      fi
+
+      _restore
+      trap - EXIT INT TERM
+    fi
+  else
+    warn "no --receiver — skipping events.log + dead-man's switch round-trip"
+  fi
+
+  step "First-arm checklist — progress (PLAN §3.7)"
+  cat >&2 <<EOF
+  [ ] 1. Quiet baseline    — ≥7 consecutive days, zero CRIT, since baseline re-sign  (auto, off-box events.log)
+  [ ] 2. apt-correlation   — at least one apt cycle correctly demoted WARN→INFO     (auto)
+  [ ] 3. fatal-dry-run     — zero would-trigger hits                                 (auto)
+  [ ] 4. off-box-first     — onionwarden fatal-test ack'd by receiver                (attested)
+  [ ] 5. dead-man's switch — heartbeats paused, deadman_provider fired               (auto, from the test above)
+  [ ] 6. OOB recovery      — operator has tested + documented power/console path     (attested; mandatory for poweroff)
+  [ ] 7. past Phase 2      — SSH hardening applied + host re-baselined to hardened   (attested)
+EOF
+
+  step "Operator decisions still pending in host.conf"
+  if [ -f "$HOST_CONF_SRC" ]; then
+    local changeme
+    changeme=$(grep -c 'CHANGE-ME' "$HOST_CONF_SRC" 2>/dev/null || printf 0)
+    if [ "$changeme" -gt 0 ]; then
+      fail "$changeme CHANGE-ME placeholder(s) in $HOST_CONF_SRC — alerts will silently no-op"
+      grep -n 'CHANGE-ME' "$HOST_CONF_SRC" >&2 || true
+    else
+      ok "no CHANGE-ME placeholders in $HOST_CONF_SRC"
+    fi
+  fi
+
+  ok "verification phase complete — review any [FAIL] / [warn] above before treating $HOST as armable"
+}
+
+# --- rollback -------------------------------------------------------------
+_rollback() {
+  step "Rollback onionwarden on $SSH_TARGET"
+  warn "this disables the watchdog. Confirm you have an investigation snapshot first."
+  plan "ssh $SSH_TARGET 'sudo systemctl disable --now onionwarden-fast.timer onionwarden-slow.timer onionwarden-daily.timer 2>/dev/null || true'"
+  _ssh "$SSH_TARGET" "sudo systemctl disable --now onionwarden-fast.timer onionwarden-slow.timer onionwarden-daily.timer 2>/dev/null || true"
+
+  plan "ssh $SSH_TARGET 'sudo crontab -l 2>/dev/null | grep -v onionwarden-run | sudo crontab -'"
+  _ssh "$SSH_TARGET" "sudo crontab -l 2>/dev/null | grep -v onionwarden-run | sudo crontab -"
+
+  plan "ssh $SSH_TARGET 'sudo chattr -R -i /opt/onionwarden /etc/onionwarden 2>/dev/null || true'"
+  _ssh "$SSH_TARGET" "sudo chattr -R -i /opt/onionwarden /etc/onionwarden 2>/dev/null || true"
+
+  plan "ssh $SSH_TARGET 'sudo chattr -i /etc/systemd/system/onionwarden-*.{timer,service} 2>/dev/null || true'"
+  _ssh "$SSH_TARGET" "sudo chattr -i /etc/systemd/system/onionwarden-*.timer /etc/systemd/system/onionwarden-*.service 2>/dev/null || true"
+
+  plan "ssh $SSH_TARGET 'sudo rm -rf /opt/onionwarden /etc/onionwarden /etc/systemd/system/onionwarden-*'"
+  _ssh "$SSH_TARGET" "sudo rm -rf /opt/onionwarden /etc/onionwarden /etc/systemd/system/onionwarden-*"
+
+  plan "ssh $SSH_TARGET 'sudo systemctl daemon-reload'"
+  _ssh "$SSH_TARGET" "sudo systemctl daemon-reload"
+
+  warn "/var/lib/onionwarden and /var/log/onionwarden retained for forensics — remove by hand only after copying off"
+  ok "rollback complete on $SSH_TARGET"
+}
+
+# --- dispatch -------------------------------------------------------------
+case "$MODE" in
+  check)            _preflight ;;
+  draft-host-conf)  _draft_host_conf ;;
+  install)          _install ;;
+  verify)           _verify ;;
+  rollback)         _rollback ;;
+  *)                EXITCODE=2 die "internal: unknown mode '$MODE'" ;;
+esac
