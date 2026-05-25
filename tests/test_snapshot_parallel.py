@@ -336,6 +336,23 @@ printf '%s' "$bundle" | bash -c "$cmd"
 
 
 # ---------------------------------------------------------------------------
+# --help completeness (regression — sed range used to truncate new flags)
+# ---------------------------------------------------------------------------
+
+def test_help_lists_all_cli_flags():
+    """--help must mention every flag the parser accepts. A `sed -n '2,Np'`
+    range previously silently dropped new flags whenever the file header
+    grew; the heredoc fix means a future flag added without updating help
+    will be caught by this test."""
+    out = subprocess.check_output(
+        [BASH, SNAPSHOT_BIN, "--help"], text=True)
+    for flag in ("--out", "--with-sudo", "--ssh-opt", "--parallel",
+                 "--single-bundle", "--print-bundle", "--print-check",
+                 "--help"):
+        assert flag in out, f"--help output missing {flag}\n--- output ---\n{out}"
+
+
+# ---------------------------------------------------------------------------
 # performance bench (the central claim)
 # ---------------------------------------------------------------------------
 
