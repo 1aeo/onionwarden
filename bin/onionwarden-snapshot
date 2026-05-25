@@ -13,7 +13,26 @@
 #   - default is a non-root session — collectors that need root degrade and
 #     the gap is reported. `--with-sudo` (sudo -n) is opt-in for the operator.
 #
-# Usage: onionwarden-snapshot HOST [--out DIR] [--with-sudo] [--ssh-opt OPT]...
+# Parallel execution: by default the tool opens up to --parallel N (default 8)
+# concurrent SSH sessions, each running ONE check's collector. The whole
+# snapshot then completes in roughly max(check time) instead of sum(check time)
+# — typically a 3-5x speedup on hosts where one or two checks dominate
+# wall-clock (relay-c/relay-a, network_deep on busy relays, etc.). Audit:
+# every collector is a pure read-only stdout writer with no file writes, no
+# environment mutation, and no inter-check ordering — confirmed safe to
+# parallelise (see PR description for the per-check audit).
+#
+# SSH MaxSessions caveat: the remote sshd's MaxSessions (default 10) caps how
+# many channels a single SSH connection can multiplex; with per-check (one
+# connection per check) execution it does NOT directly apply, but the operator
+# may still see sshd MaxStartups or PAM session limits. The tool pre-flights
+# `--parallel` concurrent connections and auto-falls-back to half on failure,
+# warning the operator to raise the limit if they want full parallelism.
+#
+# Usage:
+#   onionwarden-snapshot HOST [--out DIR] [--with-sudo] [--ssh-opt OPT]...
+#                        [--parallel N] [--single-bundle]
+#                        [--print-bundle | --print-check CHECK]
 set -euo pipefail
 
 _bin_dir=$(cd "$(dirname "$0")" && pwd)
@@ -25,37 +44,102 @@ HOST=""
 OUT=""
 WITH_SUDO=0
 PRINT_BUNDLE=0
+PRINT_CHECK=""
+PARALLEL="${ONIONWARDEN_SNAPSHOT_PARALLEL:-8}"
+SINGLE_BUNDLE=0
 SSH_OPTS=()
 REMOTE_TIMEOUT="${ONIONWARDEN_SNAPSHOT_TIMEOUT:-900}"
 PERCHECK_TIMEOUT="${ONIONWARDEN_SNAPSHOT_PERCHECK:-60}"
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+# Heredoc-based help: edits to the file header (adding/removing flags) don't
+# silently truncate --help output, which a brittle `sed -n '2,Np'` range would.
+usage() {
+  cat <<'__USAGE__'
+onionwarden-snapshot — read-only remote state capture (Mode A dry-run).
+
+SSHes into a target host, runs every check's collector remotely, and gathers
+the per-check state into a local snapshot directory. The dispatcher can then
+analyse it offline with `onionwarden-run --from-snapshot`.
+
+STRICTLY READ-ONLY on the target: collector code is streamed over SSH stdin
+(`bash -s`); no file is ever written remotely; every collector runs only read
+commands; the remote run is wrapped `timeout ... nice -n19` to stay polite;
+default is a non-root session — `--with-sudo` (sudo -n) is opt-in.
+
+Parallel execution: by default opens up to --parallel N (default 8) concurrent
+SSH sessions, each running ONE check. Snapshot completes in roughly
+max(check time) instead of sum(check time) — typically a 3-5x speedup.
+
+Usage:
+  onionwarden-snapshot HOST [--out DIR] [--with-sudo] [--ssh-opt OPT]...
+                       [--parallel N] [--single-bundle]
+                       [--print-bundle | --print-check CHECK]
+
+Options:
+  --out DIR             snapshot output directory (default: ./snapshots/HOST-TS)
+  --with-sudo           use `sudo -n` on the remote (root-only reads)
+  --ssh-opt OPT         pass-through ssh -o OPT (repeatable)
+  --parallel N          run N checks concurrently (default 8, max 32)
+  --single-bundle       legacy single-SSH bundle (one remote session, serial)
+  --print-bundle        print the legacy full bundle to stdout and exit
+  --print-check CHECK   print the per-check bundle for CHECK and exit
+  -h, --help            show this help and exit
+
+Env:
+  ONIONWARDEN_SNAPSHOT_SSH        override the ssh client (tests)
+  ONIONWARDEN_SNAPSHOT_PARALLEL   default --parallel value
+  ONIONWARDEN_SNAPSHOT_TIMEOUT    overall remote timeout (single-bundle, sec)
+  ONIONWARDEN_SNAPSHOT_PERCHECK   per-check collector timeout (sec)
+__USAGE__
+  exit "${1:-0}"
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --out)          OUT=$2; shift 2 ;;
-    --with-sudo)    WITH_SUDO=1; shift ;;
-    --ssh-opt)      SSH_OPTS+=( "$2" ); shift 2 ;;
-    --print-bundle) PRINT_BUNDLE=1; shift ;;
-    -h|--help)      usage 0 ;;
-    -*)             echo "onionwarden-snapshot: unknown option: $1" >&2; usage 1 ;;
-    *)              [ -z "$HOST" ] || die "only one HOST may be given"; HOST=$1; shift ;;
+    --out)            OUT=$2; shift 2 ;;
+    --with-sudo)      WITH_SUDO=1; shift ;;
+    --ssh-opt)        SSH_OPTS+=( "$2" ); shift 2 ;;
+    --parallel)       PARALLEL=$2; shift 2 ;;
+    --single-bundle)  SINGLE_BUNDLE=1; shift ;;
+    --print-bundle)   PRINT_BUNDLE=1; shift ;;
+    --print-check)    PRINT_CHECK=$2; shift 2 ;;
+    -h|--help)        usage 0 ;;
+    -*)               echo "onionwarden-snapshot: unknown option: $1" >&2; usage 1 ;;
+    *)                [ -z "$HOST" ] || die "only one HOST may be given"; HOST=$1; shift ;;
   esac
 done
-[ -n "$HOST" ] || [ "$PRINT_BUNDLE" = 1 ] || { echo "onionwarden-snapshot: HOST is required" >&2; usage 1; }
 
-if [ "$PRINT_BUNDLE" != 1 ]; then
+# Validate --parallel
+case "$PARALLEL" in
+  ''|*[!0-9]*) die "--parallel: must be a positive integer (got: '$PARALLEL')" ;;
+esac
+[ "$PARALLEL" -ge 1 ] || die "--parallel: must be >= 1 (got: $PARALLEL)"
+[ "$PARALLEL" -le 32 ] || die "--parallel: refusing values > 32 (got: $PARALLEL) — sshd MaxSessions defaults to 10"
+
+[ -n "$HOST" ] || [ "$PRINT_BUNDLE" = 1 ] || [ -n "$PRINT_CHECK" ] || {
+  echo "onionwarden-snapshot: HOST is required" >&2; usage 1; }
+
+if [ "$PRINT_BUNDLE" != 1 ] && [ -z "$PRINT_CHECK" ]; then
   [ -n "$OUT" ] || OUT="$ONIONWARDEN_ROOT/snapshots/${HOST}-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$OUT/raw"
 fi
 
+# --- ssh wrapper -----------------------------------------------------------
+# ONIONWARDEN_SNAPSHOT_SSH lets tests substitute a stub for the real ssh
+# client. The stub is invoked the same way as ssh: STUB HOST COMMAND [...], with
+# stdin/stdout/stderr passed through. Tests use this to run the bundle locally
+# without needing a real SSH peer.
 _ssh() {
+  if [ -n "${ONIONWARDEN_SNAPSHOT_SSH:-}" ]; then
+    "$ONIONWARDEN_SNAPSHOT_SSH" "$HOST" "$@"
+    return
+  fi
   ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
     ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$HOST" "$@"
 }
 
 # --- preflight: a non-interactive SSH session must work, or fail loud --------
-if [ "$PRINT_BUNDLE" = 1 ]; then
+if [ "$PRINT_BUNDLE" = 1 ] || [ -n "$PRINT_CHECK" ]; then
   REMOTE_USER=""; REMOTE_UID=""; REMOTE_OS=""
 else
   log_info "snapshot: preflight — testing non-interactive SSH to '$HOST'"
@@ -75,16 +159,10 @@ else
   fi
 fi
 
-# --- build the self-contained collector bundle ------------------------------
-# Inline every lib + check, stripping the inter-file `source` statements and
-# the per-check CLI shim, then append a driver. The result is one stream that
-# `bash -s` runs entirely from stdin — nothing is written on the target.
-BUNDLE=$(mktemp "${TMPDIR:-/tmp}/onionwarden-bundle.XXXXXX")
-trap 'rm -f "$BUNDLE"' EXIT
-
+# --- helpers: bundle generation --------------------------------------------
+# _strip FILE — drop `. "..."` source statements and the trailing
+# `if [ BASH_SOURCE = $0 ]` CLI shim (3 lines); keep everything else.
 _strip() {
-  # drop `. "..."` source statements and the trailing `if [ BASH_SOURCE = $0 ]`
-  # CLI shim (3 lines); keep everything else.
   awk '
     /^[[:space:]]*\. "/ { next }
     index($0, "\"${BASH_SOURCE[0]}\" = \"${0:-}\"") { sk = 3 }
@@ -93,28 +171,35 @@ _strip() {
   ' "$1"
 }
 
-CHECK_NAMES=""
-for c in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
-  CHECK_NAMES="$CHECK_NAMES $(basename "$c" .sh)"
-done
-
-{
+# _emit_lib_prologue — preamble + inlined shared libs.
+# Pure stdout — caller redirects to bundle file.
+#
+# NO `-u` and NO `-e` in the preamble. Inlined check_runtime.sh and common.sh
+# have `_crt_dir="$(dirname "${BASH_SOURCE[0]}")"` and a similar line in
+# onionwarden_root() — under bash 5 `bash -s`, BASH_SOURCE has 0 elements so
+# `${BASH_SOURCE[0]}` is unbound and tripped `set -u` (silently truncating
+# network_deep and process_ancestry output). Just `pipefail` is enough for the
+# bundle wrapper; each inlined check file re-enables -e/-u in its own preamble
+# for the duration of its top-level code (function defs); the driver below
+# explicitly disables both before invoking collectors.
+_emit_lib_prologue() {
   printf '#!/usr/bin/env bash\n'
-  # Preamble: NO `-u` and NO `-e`. Inlined check_runtime.sh and common.sh have
-  # `_crt_dir="$(dirname "${BASH_SOURCE[0]}")"` and a similar line in
-  # onionwarden_root() — under bash 5 `bash -s`, BASH_SOURCE has 0 elements so
-  # `${BASH_SOURCE[0]}` is unbound and tripped `set -u` (silently truncating
-  # network_deep and process_ancestry output). Just `pipefail` is enough for
-  # the bundle wrapper; each inlined check file re-enables -e/-u in its own
-  # preamble for the duration of its top-level code (function defs), and the
-  # driver below explicitly disables both before invoking collectors.
   printf 'set -o pipefail\n'
   printf 'export ONIONWARDEN_ROOT=/nonexistent-remote\n'
+  local lib
   for lib in common config profile apt_correlate check_runtime; do
     _strip "$ONIONWARDEN_ROOT/lib/$lib.sh"
   done
+}
+
+# _emit_full_bundle — the legacy single-SSH bundle: lib prologue, every
+# check file, watchdog, driver loop with delimiters.
+_emit_full_bundle() {
+  _emit_lib_prologue
+  local c CHECK_NAMES=""
   for c in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     _strip "$c"
+    CHECK_NAMES="$CHECK_NAMES $(basename "$c" .sh)"
   done
   # Collector runtime: -e OFF (one bad collector must not abort the bundle)
   # AND -u OFF (BASH_SOURCE[0] accesses in inlined libs must not fault). Each
@@ -139,47 +224,260 @@ __snap() {
     kill -KILL -- -"$__p" 2>/dev/null || kill -KILL "$__p" 2>/dev/null ) 2>/dev/null &
   __w=$!
   wait "$__p" 2>/dev/null
+  __rc=$?
   kill -- -"$__w" 2>/dev/null; kill "$__w" 2>/dev/null; wait "$__w" 2>/dev/null
-  printf '###ONIONWARDEN-SNAPSHOT-END:%s###\n' "$1"
+  printf '###ONIONWARDEN-SNAPSHOT-END:%s:%s###\n' "$1" "$__rc"
 }
 __SNAPFN__
   # The `profile` check's collector IS profile_detect, so the loop below
   # produces profile.current; the tool copies it to profile.state afterwards.
   printf 'for __c in%s; do __snap "$__c"; done\n' "$CHECK_NAMES"
-} > "$BUNDLE"
+}
 
-if ! bash -n "$BUNDLE" 2>/dev/null; then
-  die "snapshot: generated collector bundle failed syntax check — aborting (no SSH attempted)"
-fi
+# _emit_check_bundle CHECK — a minimal per-check bundle: lib prologue, the
+# single check's inlined source, and an invocation of `<check>_collect`. The
+# remote bash session's STDOUT IS the .current content for that check (no
+# delimiters needed — one session per check, one output stream).
+_emit_check_bundle() {
+  local check=$1
+  local cfile="$ONIONWARDEN_ROOT/lib/checks/$check.sh"
+  [ -f "$cfile" ] || die "no such check: '$check' (expected $cfile)"
+  _emit_lib_prologue
+  _strip "$cfile"
+  printf 'set +eu\n'
+  printf 'set -m\n'
+  printf '__PERCHECK=%s\n' "$PERCHECK_TIMEOUT"
+  # Same in-bundle watchdog as the full bundle: one slow collector cannot
+  # starve the SSH session because we kill the process group after $__PERCHECK
+  # seconds. This is belt-and-braces — we ALSO wrap the client-side ssh call in
+  # a timeout — so even if the bundle's watchdog mis-fires we cut the channel.
+  cat <<'__SNAPFN__'
+__snap_one() {
+  ( "${1}_collect" 2>/dev/null ) &
+  __p=$!
+  ( sleep "$__PERCHECK"
+    kill -TERM -- -"$__p" 2>/dev/null || kill -TERM "$__p" 2>/dev/null
+    sleep 3
+    kill -KILL -- -"$__p" 2>/dev/null || kill -KILL "$__p" 2>/dev/null ) 2>/dev/null &
+  __w=$!
+  wait "$__p" 2>/dev/null
+  __rc=$?
+  # Kill the watchdog now that the collector has finished. The `wait` on the
+  # killed watchdog would return 143/137 if we let it bubble up; we discard it
+  # so the script's exit reflects the COLLECTOR's status (0 on success), not
+  # the always-signalled watchdog teardown.
+  kill -- -"$__w" 2>/dev/null; kill "$__w" 2>/dev/null
+  wait "$__w" 2>/dev/null || true
+  return "$__rc"
+}
+__SNAPFN__
+  printf '__snap_one %s\n' "$check"
+  # Force the bundle to exit 0 on collector success (per-check semantics: the
+  # client uses `_ssh ... && rc=0 || rc=$?` and a non-zero exit becomes a
+  # FAILED report). Without this, even a fast successful collector would
+  # appear to exit non-zero if the watchdog teardown signal bled through.
+  printf 'exit $?\n'
+}
 
-# --- --print-bundle: tests + operators inspect the wire payload, no SSH ----
+# --- print modes (no SSH): tests + operators inspect the wire payload ------
 if [ "$PRINT_BUNDLE" = 1 ]; then
+  BUNDLE=$(mktemp "${TMPDIR:-/tmp}/onionwarden-bundle.XXXXXX")
+  trap 'rm -f "$BUNDLE"' EXIT
+  _emit_full_bundle > "$BUNDLE"
+  bash -n "$BUNDLE" 2>/dev/null || die "snapshot: generated full bundle failed syntax check"
+  cat "$BUNDLE"
+  exit 0
+fi
+if [ -n "$PRINT_CHECK" ]; then
+  BUNDLE=$(mktemp "${TMPDIR:-/tmp}/onionwarden-cbundle.XXXXXX")
+  trap 'rm -f "$BUNDLE"' EXIT
+  _emit_check_bundle "$PRINT_CHECK" > "$BUNDLE"
+  bash -n "$BUNDLE" 2>/dev/null || die "snapshot: generated check bundle for '$PRINT_CHECK' failed syntax check"
   cat "$BUNDLE"
   exit 0
 fi
 
-log_info "snapshot: collector bundle built ($(wc -l < "$BUNDLE" | tr -d ' ') lines)"
+# --- build the bundles upfront ---------------------------------------------
+BUNDLE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-bundles.XXXXXX")
+trap 'rm -rf "$BUNDLE_DIR"' EXIT
 
-# --- run the bundle remotely, read-only -------------------------------------
-REMOTE_CMD="timeout ${REMOTE_TIMEOUT} nice -n 19 bash -s"
-[ "$WITH_SUDO" = 1 ] && REMOTE_CMD="sudo -n $REMOTE_CMD"
-log_info "snapshot: running collectors on $HOST (read-only; $REMOTE_CMD)"
+CHECK_LIST=""
+for c in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
+  CHECK_LIST="$CHECK_LIST $(basename "$c" .sh)"
+done
 
-RAW="$OUT/raw/remote-collect.log"
-if ! _ssh "$REMOTE_CMD" < "$BUNDLE" > "$RAW" 2>"$OUT/raw/remote-stderr.log"; then
-  log_warn "snapshot: remote collection exited non-zero — partial data; see raw/remote-stderr.log"
+if [ "$SINGLE_BUNDLE" = 1 ]; then
+  BUNDLE="$BUNDLE_DIR/full.bundle"
+  _emit_full_bundle > "$BUNDLE"
+  bash -n "$BUNDLE" 2>/dev/null || die "snapshot: generated collector bundle failed syntax check — aborting (no SSH attempted)"
+  log_info "snapshot: collector bundle built ($(wc -l < "$BUNDLE" | tr -d ' ') lines, single-bundle mode)"
+else
+  total=0
+  for check in $CHECK_LIST; do
+    _emit_check_bundle "$check" > "$BUNDLE_DIR/$check.bundle"
+    bash -n "$BUNDLE_DIR/$check.bundle" 2>/dev/null || \
+      die "snapshot: generated bundle for '$check' failed syntax check — aborting (no SSH attempted)"
+    total=$(( total + 1 ))
+  done
+  log_info "snapshot: $total per-check bundles built (parallel=$PARALLEL mode)"
 fi
-[ -s "$RAW" ] || die "snapshot: remote collection produced no output — aborting"
 
-# --- split the delimited stream into per-check state files ------------------
-awk -v dir="$OUT" '
-  /^###ONIONWARDEN-SNAPSHOT:/ {
-    name = $0; sub(/^###ONIONWARDEN-SNAPSHOT:/, "", name); sub(/###$/, "", name)
-    out = dir "/" name ".current"; printf "" > out; next
+REMOTE_CMD_BASE="nice -n 19 bash -s"
+[ "$WITH_SUDO" = 1 ] && REMOTE_CMD_BASE="sudo -n $REMOTE_CMD_BASE"
+
+# =============================================================================
+# SINGLE-BUNDLE LEGACY PATH (one SSH session, serial loop on remote)
+# =============================================================================
+if [ "$SINGLE_BUNDLE" = 1 ]; then
+  REMOTE_CMD="timeout ${REMOTE_TIMEOUT} ${REMOTE_CMD_BASE}"
+  log_info "snapshot: running collectors on $HOST (read-only; $REMOTE_CMD)"
+  RAW="$OUT/raw/remote-collect.log"
+  if ! _ssh "$REMOTE_CMD" < "$BUNDLE" > "$RAW" 2>"$OUT/raw/remote-stderr.log"; then
+    log_warn "snapshot: remote collection exited non-zero — partial data; see raw/remote-stderr.log"
+  fi
+  [ -s "$RAW" ] || die "snapshot: remote collection produced no output — aborting"
+  # Split the delimited stream into per-check state files AND per-check .exit
+  # files. The END marker carries the collector's return code as
+  # `###ONIONWARDEN-SNAPSHOT-END:NAME:RC###`, so single-bundle mode produces
+  # the same .exit-file shape as the parallel path — the failure-count loop
+  # below works identically for both modes. Checks present in the markers but
+  # missing an END line (truncated stream) get rc=124 (timeout-style) so they
+  # still surface as FAILED in the report rather than silently passing.
+  awk -v dir="$OUT" '
+    /^###ONIONWARDEN-SNAPSHOT:/ {
+      if (name != "") { print 124 > (dir "/" name ".exit"); close(dir "/" name ".exit") }
+      name = $0; sub(/^###ONIONWARDEN-SNAPSHOT:/, "", name); sub(/###$/, "", name)
+      out = dir "/" name ".current"; printf "" > out; next
+    }
+    /^###ONIONWARDEN-SNAPSHOT-END:/ {
+      payload = $0; sub(/^###ONIONWARDEN-SNAPSHOT-END:/, "", payload); sub(/###$/, "", payload)
+      end_name = payload; end_rc = "0"
+      idx = index(payload, ":")
+      if (idx > 0) { end_name = substr(payload, 1, idx - 1); end_rc = substr(payload, idx + 1) }
+      print end_rc > (dir "/" end_name ".exit"); close(dir "/" end_name ".exit")
+      name = ""; out = ""; next
+    }
+    out { print >> out }
+    END { if (name != "") { print 124 > (dir "/" name ".exit"); close(dir "/" name ".exit") } }
+  ' "$RAW"
+else
+# =============================================================================
+# PARALLEL PER-CHECK PATH (one SSH session per check, capped at $PARALLEL)
+# =============================================================================
+  # --- pre-flight: rapid concurrent SSH × $PARALLEL to detect MaxSessions ----
+  # Each preflight session sleeps briefly so they all hold a channel open at
+  # the same instant — if sshd's MaxSessions (or MaxStartups, or PAM session
+  # limit) is below $PARALLEL one of them will be rejected.
+  if [ "$PARALLEL" -gt 1 ]; then
+    log_info "snapshot: pre-flight — $PARALLEL concurrent SSH sessions to detect MaxSessions"
+    PREFLIGHT_DIR="$BUNDLE_DIR/preflight"
+    mkdir -p "$PREFLIGHT_DIR"
+    pf_pids=""
+    i=0
+    while [ "$i" -lt "$PARALLEL" ]; do
+      i=$(( i + 1 ))
+      (
+        # Hold a channel for ~2s so the N sessions overlap in time.
+        if _ssh 'sleep 2; echo ok' > "$PREFLIGHT_DIR/$i.out" 2> "$PREFLIGHT_DIR/$i.err"; then
+          : > "$PREFLIGHT_DIR/$i.ok"
+        fi
+      ) &
+      pf_pids="$pf_pids $!"
+    done
+    for p in $pf_pids; do wait "$p" 2>/dev/null || true; done
+    ok_count=0
+    fail_count=0
+    i=0
+    while [ "$i" -lt "$PARALLEL" ]; do
+      i=$(( i + 1 ))
+      if [ -f "$PREFLIGHT_DIR/$i.ok" ]; then
+        ok_count=$(( ok_count + 1 ))
+      else
+        fail_count=$(( fail_count + 1 ))
+      fi
+    done
+    if [ "$fail_count" -gt 0 ]; then
+      fallback=$(( PARALLEL / 2 ))
+      [ "$fallback" -ge 1 ] || fallback=1
+      log_warn "snapshot: pre-flight — only $ok_count/$PARALLEL concurrent sessions succeeded"
+      log_warn "snapshot: the host's sshd MaxSessions (default 10) or MaxStartups is below $PARALLEL"
+      log_warn "snapshot: falling back to --parallel $fallback — raise sshd MaxSessions and rerun for full speedup"
+      PARALLEL="$fallback"
+    else
+      log_info "snapshot: pre-flight — all $PARALLEL concurrent SSH sessions OK"
+    fi
+  fi
+
+  # --- semaphore (FIFO with $PARALLEL tokens) on fd 9. bash 3.2-safe ---------
+  if [ "$PARALLEL" -gt 1 ]; then
+    SEM_FIFO=$(mktemp -u "${TMPDIR:-/tmp}/onionwarden-sem.XXXXXX")
+    mkfifo "$SEM_FIFO"
+    exec 9<>"$SEM_FIFO"
+    rm -f "$SEM_FIFO"
+    i=0
+    while [ "$i" -lt "$PARALLEL" ]; do
+      i=$(( i + 1 ))
+      printf '.\n' >&9
+    done
+  fi
+
+  REMOTE_CMD="timeout $(( PERCHECK_TIMEOUT + 10 )) ${REMOTE_CMD_BASE}"
+  log_info "snapshot: running $(echo $CHECK_LIST | wc -w | tr -d ' ') collectors on $HOST (parallel=$PARALLEL; per-check timeout=${PERCHECK_TIMEOUT}s)"
+
+  RUN_START=$(date +%s)
+
+  # _run_one_check CHECK — invoked in foreground (PARALLEL=1) or inside a
+  # backgrounded semaphore-bracketed subshell (PARALLEL>1).
+  _run_one_check() {
+    local check=$1 rc started elapsed
+    started=$(date +%s)
+    if _ssh "$REMOTE_CMD" < "$BUNDLE_DIR/$check.bundle" \
+         > "$OUT/$check.current" 2> "$OUT/$check.err"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    elapsed=$(( $(date +%s) - started ))
+    printf '%d\n' "$rc" > "$OUT/$check.exit"
+    if [ "$rc" = 0 ]; then
+      if [ -s "$OUT/$check.err" ]; then
+        log_info "snapshot: $check OK (${elapsed}s; stderr non-empty — see $check.err)"
+      else
+        log_info "snapshot: $check OK (${elapsed}s)"
+      fi
+    else
+      log_warn "snapshot: $check FAILED rc=$rc (${elapsed}s) — see $check.err"
+    fi
   }
-  /^###ONIONWARDEN-SNAPSHOT-END:/ { out = ""; next }
-  out { print >> out }
-' "$RAW"
+
+  if [ "$PARALLEL" = 1 ]; then
+    for check in $CHECK_LIST; do
+      _run_one_check "$check"
+    done
+  else
+    job_pids=""
+    for check in $CHECK_LIST; do
+      (
+        # acquire one semaphore token before doing work
+        read -u 9 _sem_tok
+        _run_one_check "$check"
+        # release the token
+        printf '.\n' >&9
+      ) &
+      job_pids="$job_pids $!"
+    done
+    for p in $job_pids; do
+      wait "$p" 2>/dev/null || true
+    done
+    exec 9<&-
+  fi
+
+  RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
+  log_info "snapshot: collectors finished in ${RUN_ELAPSED}s"
+fi
+# =============================================================================
+# END mode-specific paths — POST-PROCESSING IS COMMON
+# =============================================================================
 
 # profile.current mirrors profile.state (the dispatcher needs both).
 if [ -f "$OUT/profile.current" ]; then
@@ -193,18 +491,33 @@ fi
   printf 'remote_uid=%s\n' "$REMOTE_UID"
   printf 'remote_os=%s\n' "$REMOTE_OS"
   printf 'with_sudo=%s\n' "$WITH_SUDO"
+  if [ "$SINGLE_BUNDLE" = 1 ]; then
+    printf 'parallel=single-bundle\n'
+  else
+    printf 'parallel=%s\n' "$PARALLEL"
+  fi
   printf 'mode=%s\n' "$( [ "$REMOTE_UID" = 0 ] && printf root || printf read-only-nonroot )"
 } > "$OUT/raw/meta.txt"
 
 # --- report -----------------------------------------------------------------
 echo
 echo "=== snapshot complete: $OUT ==="
-echo "host=$HOST user=$REMOTE_USER uid=$REMOTE_UID os=$REMOTE_OS with_sudo=$WITH_SUDO"
-complete=0; empty=0; na=0
-for f in "$OUT"/*.current; do
+echo "host=$HOST user=$REMOTE_USER uid=$REMOTE_UID os=$REMOTE_OS with_sudo=$WITH_SUDO parallel=$PARALLEL"
+complete=0; empty=0; na=0; failed=0
+# Sort the per-check report by name for deterministic output (the parallel
+# runner finishes checks in non-deterministic order; the on-disk listing is
+# what operators see and what tests assert on).
+for f in $(ls "$OUT"/*.current 2>/dev/null | LC_ALL=C sort); do
   [ -f "$f" ] || continue
   n=$(basename "$f" .current)
-  if [ ! -s "$f" ]; then
+  exit_rc=0
+  if [ -f "$OUT/$n.exit" ]; then
+    exit_rc=$(cat "$OUT/$n.exit" 2>/dev/null || echo 0)
+  fi
+  if [ "$exit_rc" != 0 ]; then
+    printf '  %-18s FAILED (rc=%s — see %s.err)\n' "$n" "$exit_rc" "$n"
+    failed=$(( failed + 1 ))
+  elif [ ! -s "$f" ]; then
     printf '  %-18s EMPTY (no data — likely permission-blocked or N/A)\n' "$n"
     empty=$(( empty + 1 ))
   elif grep -q '^na ' "$f" 2>/dev/null || grep -q ' na ' "$f" 2>/dev/null; then
@@ -215,10 +528,14 @@ for f in "$OUT"/*.current; do
     complete=$(( complete + 1 ))
   fi
 done
-echo "--- $complete with data, $na N/A, $empty empty ---"
+echo "--- $complete with data, $na N/A, $empty empty, $failed failed ---"
 [ "$REMOTE_UID" != 0 ] && [ "$WITH_SUDO" != 1 ] && \
   echo "NOTE: read-only non-root capture — root-only reads (/etc/shadow, sshd -T," \
        "nft ruleset, /proc/*/environ, bpftool, dmidecode) are absent. Re-run" \
        "--with-sudo (operator approval) to fill those."
 echo
 echo "Next: onionwarden-run --from-snapshot '$OUT'"
+
+# Exit non-zero if any check failed so callers (CI, dispatcher, operator
+# scripting) can detect partial-snapshot conditions without grepping output.
+[ "$failed" = 0 ] || exit 2
