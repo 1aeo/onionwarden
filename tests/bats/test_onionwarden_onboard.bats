@@ -73,6 +73,26 @@ teardown() {
   [[ "$output" == *"unknown option"* ]]
 }
 
+# --- require_arg: long-options need a non-flag value (CodeRabbit PR #2) ----
+
+@test "--ssh-target with no following value = exit 2" {
+  run "$SCRIPT" --check fakehost --ssh-target
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--ssh-target requires a value"* ]]
+}
+
+@test "--receiver consuming a following flag = exit 2" {
+  run "$SCRIPT" --check --receiver --verify fakehost
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--receiver requires a value"* ]]
+}
+
+@test "--stale-window with empty value = exit 2" {
+  run "$SCRIPT" --verify --stale-window "" fakehost
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--stale-window requires a value"* ]]
+}
+
 # --- dry-run output matches expected patterns -----------------------------
 
 @test "--check --dry-run prints all five pre-flight steps" {
