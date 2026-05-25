@@ -140,6 +140,7 @@ teardown() {
 @test "--install --dry-run --no-chattr passes --no-immutable to install.sh" {
   run "$SCRIPT" --install --dry-run --no-chattr \
     --hosts-dir "$HOSTS" --pubkey "$PUB" \
+    --receiver onionwarden@receiver.example.net:22922 \
     fakehost
   [ "$status" -eq 0 ]
   [[ "$output" == *"--no-immutable"* ]]
@@ -148,6 +149,7 @@ teardown() {
 @test "--install --dry-run WITHOUT --no-chattr does NOT pass --no-immutable" {
   run "$SCRIPT" --install --dry-run \
     --hosts-dir "$HOSTS" --pubkey "$PUB" \
+    --receiver onionwarden@receiver.example.net:22922 \
     fakehost
   [ "$status" -eq 0 ]
   [[ "$output" != *"--no-immutable"* ]]
@@ -171,13 +173,36 @@ teardown() {
   [[ "$output" == *"past Phase 2"* ]]
 }
 
-@test "--verify --dry-run without --receiver skips events.log round-trip" {
+@test "--verify without --receiver and no fallback = exit 4 (fail-fast)" {
+  # No .env, no offbox_log_target in fakehost.conf → must fail loudly
+  # rather than silently skip the receiver round-trip (CodeRabbit PR #3).
+  run "$SCRIPT" --verify --dry-run \
+    --hosts-dir "$HOSTS" --pubkey "$PUB" \
+    fakehost
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"could not derive"* ]]
+  [[ "$output" == *"offbox_log_target"* ]]
+}
+
+@test "--verify --receiver derived from hosts/<HOST>.conf offbox_log_target" {
+  # Add an offbox_log_target line so _resolve_receiver picks it up.
+  printf 'offbox_log_target = "onionwarden@receiver.example.net:~/data/fakehost/events.log"\n' \
+    >> "$HOSTS/fakehost.conf"
   run "$SCRIPT" --verify --dry-run \
     --hosts-dir "$HOSTS" --pubkey "$PUB" \
     fakehost
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no --receiver"* ]]
-  [[ "$output" == *"First-arm checklist"* ]]
+  [[ "$output" == *"onionwarden@receiver.example.net"* ]]
+  [[ "$output" == *"events.log"* ]]
+  [[ "$output" == *"Dead-man's switch round-trip"* ]]
+}
+
+@test "--install fail-fast when no --receiver and no fallback" {
+  run "$SCRIPT" --install --dry-run \
+    --hosts-dir "$HOSTS" --pubkey "$PUB" \
+    fakehost
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"could not derive"* ]]
 }
 
 @test "--verify --dry-run --stale-window overrides the default" {
@@ -228,6 +253,7 @@ teardown() {
 @test "--ssh-opt is repeatable and forwarded to ssh" {
   run "$SCRIPT" --install --dry-run \
     --hosts-dir "$HOSTS" --pubkey "$PUB" \
+    --receiver onionwarden@receiver.example.net:22922 \
     --ssh-opt "ProxyJump=bastion" \
     --ssh-opt "User=ops" \
     fakehost

@@ -190,6 +190,77 @@ HOST_CONF_SRC="$HOSTS_DIR/$HOST.conf"
 HOST_CONF_SIG="$HOSTS_DIR/$HOST.conf.sig"
 BASELINE_DIR="$HOSTS_DIR/$HOST.baseline"
 
+# _read_env_var FILE VAR
+#   Read `VAR=value` from FILE, stripping shell-style comments + surrounding
+#   whitespace and surrounding quotes. Treats <CHANGE-ME-...> placeholders
+#   as unset so a freshly-copied .env.example does not appear "configured".
+_read_env_var() {
+  local file=$1 var=$2 val
+  [ -f "$file" ] || return 1
+  val=$(awk -F= -v key="$var" '
+    $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      sub(/^"|"$/, ""); sub(/^'\''|'\''$/, "")
+      sub(/[[:space:]]+$/, "")
+      print
+      exit
+    }' "$file" 2>/dev/null) || return 1
+  case "$val" in ""|*CHANGE-ME*) return 1 ;; esac
+  printf '%s' "$val"
+}
+
+# _resolve_receiver
+#   Populate RECEIVER from .env (ONIONWARDEN_RECEIVER_USER/HOST/PORT) or
+#   from hosts/<HOST>.conf (offbox_log_target = "user@host:path") when the
+#   operator did not pass --receiver. Returns 0 on success, 1 if still
+#   unset. Idempotent: a non-empty RECEIVER is left alone.
+_resolve_receiver() {
+  [ -n "$RECEIVER" ] && return 0
+
+  local env_file="$REPO_ROOT/.env" r_user r_host r_port
+  r_user=$(_read_env_var "$env_file" ONIONWARDEN_RECEIVER_USER) || r_user=""
+  r_host=$(_read_env_var "$env_file" ONIONWARDEN_RECEIVER_HOST) || r_host=""
+  r_port=$(_read_env_var "$env_file" ONIONWARDEN_RECEIVER_PORT) || r_port=""
+  if [ -n "$r_user" ] && [ -n "$r_host" ]; then
+    RECEIVER="${r_user}@${r_host}"
+    [ -n "$r_port" ] && RECEIVER="${RECEIVER}:${r_port}"
+    return 0
+  fi
+
+  if [ -f "$HOST_CONF_SRC" ]; then
+    # offbox_log_target = "user@host:path"  →  extract user@host
+    local target
+    target=$(awk -F= '
+      /^[[:space:]]*offbox_log_target[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, "")
+        sub(/^"|"$/, ""); sub(/[[:space:]]*#.*$/, "")
+        print; exit
+      }' "$HOST_CONF_SRC" 2>/dev/null)
+    if [ -n "${target:-}" ]; then
+      local sshpart=${target%:*}
+      if [ -n "$sshpart" ] && [[ "$sshpart" == *@* ]]; then
+        RECEIVER="$sshpart"
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+# Resolve RECEIVER as early as possible so every mode sees a consistent
+# value. For --install / --verify a missing receiver is fatal: receiver-side
+# round-trip verification is the whole point of those modes per PLAN §4 /
+# §3.7 item 5, and silent skipping is what CodeRabbit flagged.
+_resolve_receiver || true
+case "$MODE" in
+  install|verify)
+    [ -n "$RECEIVER" ] || {
+      EXITCODE=4 die "no --receiver and could not derive one from $REPO_ROOT/.env (ONIONWARDEN_RECEIVER_USER/HOST) or $HOST_CONF_SRC (offbox_log_target); pass --receiver USER@HOST[:PORT]"
+    }
+    ;;
+esac
+
 # --- ssh helpers ----------------------------------------------------------
 # Populate the global _SSH_FLAGS array with the ssh flags + target derived
 # from USER@HOST:PORT. We use an array (rather than a space-joined string)
