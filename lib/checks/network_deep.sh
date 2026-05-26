@@ -10,6 +10,18 @@
 # each, builds a single inode->pid map from one walk of /proc/<pid>/fd, and
 # reads each PID's comm + cgroup ONCE (cached). It is O(connections + pids) —
 # never per-connection /proc reads. ONIONWARDEN_PROC overrides /proc for tests.
+#
+# Normalization (parallel-snapshot byte-identity): the per-connection 5-tuple
+# from /proc/net/tcp* churns on a busy guard — ephemeral src_port rotates per
+# socket, TCP state cycles ESTABLISHED→TIME_WAIT→CLOSE within milliseconds. Two
+# parallel snapshots a few seconds apart see DIFFERENT 5-tuple sets for the
+# same stable peers. To get byte-identical `.current` across runs while keeping
+# the tamper signal ("is there a new outbound destination? a new program
+# initiating outbound?"), each outbound row is canonicalized to (comm, dst:port)
+# — DROPPING src_port (ephemeral) and TCP fine-state (transient) — then sort -u'd.
+# The verbose 5-tuple form with src_port + fine state goes to `RAW:`-prefixed
+# lines that the snapshot tool relocates to `raw/network_deep.raw` (NOT
+# compared) for forensic deep-dives.
 set -euo pipefail
 
 # shellcheck source=lib/check_runtime.sh
@@ -18,9 +30,25 @@ set -euo pipefail
 CHECK_NAME="network_deep"
 CHECK_CADENCE="slow"
 
-# _network_deep_outbound PROC MODE UNIT — emit `outbound <comm> <remote>` for
-# every established/connected socket, excluding (when MODE=exclude-process)
-# those owned by a cgroup containing UNIT.
+# _network_deep_outbound PROC MODE UNIT — emit two parallel streams for every
+# outbound socket, excluding (when MODE=exclude-process) those owned by a
+# cgroup containing UNIT:
+#
+#   `outbound <comm> <remote>`                       — normalized, sort -u
+#       Canonical tamper-detection row. Source port and TCP fine-state are
+#       DROPPED so a stable peer set produces byte-identical output across
+#       parallel snapshot runs even when ephemeral src_port and state churn.
+#
+#   `RAW: outbound_raw <proto> <state> <comm> <src> <remote>`  — sort -u
+#       Verbose forensic detail (proto + fine TCP state + src_port).
+#       Snapshot tool relocates `RAW:`-prefixed lines to raw/<check>.raw, so
+#       these are NOT part of `.current` — `network_deep.raw` is NOT compared
+#       for tamper detection. May legitimately differ across snapshots.
+#
+# TCP state coverage was widened from `ESTABLISHED only` to
+# ESTABLISHED+CLOSING-bucket+SYN-bucket so a destination that's briefly in
+# TIME_WAIT (very common during peer rotation) still shows up as outbound.
+# LISTEN (no remote) and CLOSE (transient dead socket) are skipped.
 _network_deep_outbound() {
   local proc=$1 mode=$2 unit=$3 d p
   # inode->pid pairs from one `ls -l` per PID over its fd/ dir (portable — no
@@ -87,24 +115,58 @@ _network_deep_outbound() {
       }
       return unitc[pid]
     }
+    # Map /proc/net/tcp hex state (01..0B) to a coarse bucket. Buckets are the
+    # state_class — fine states within the same bucket are TREATED AS THE SAME
+    # for forensic raw lines, so a peer in TIME_WAIT (06) vs CLOSE_WAIT (08)
+    # produces the same RAW row.
+    #   01           -> ESTABLISHED
+    #   02, 03       -> SYN          (SYN_SENT, SYN_RECV)
+    #   04,05,06,08,09,0B -> CLOSING (FIN_WAIT_1, FIN_WAIT_2, TIME_WAIT, CLOSE_WAIT, LAST_ACK, CLOSING)
+    #   0A           -> LISTEN       (no remote — skipped upstream)
+    #   07           -> CLOSE        (transient dead socket — skipped upstream)
+    function state_class(st) {
+      if (st == "01") return "ESTABLISHED"
+      if (st == "02" || st == "03") return "SYN"
+      if (st == "04" || st == "05" || st == "06" \
+          || st == "08" || st == "09" || st == "0B") return "CLOSING"
+      if (st == "0A") return "LISTEN"
+      return "OTHER"
+    }
     # phase 1 (stdin): inode -> pid
     { inopid[$1] = $2 }
     END {
       n = split("net/tcp net/tcp6 net/udp net/udp6", files, " ")
       for (fi = 1; fi <= n; fi++) {
         f = proc "/" files[fi]
-        is_tcp = (files[fi] ~ /tcp/)
+        proto = files[fi]; sub(/^net\//, "", proto)
+        is_tcp = (proto ~ /tcp/)
         while ((getline line < f) > 0) {
           c = split(line, F, " ")
           if (c < 10 || F[1] !~ /:$/) continue          # header / short line
-          st = F[4]; rem = F[3]; ino = F[10]
-          if (is_tcp) { if (st != "01") continue }       # TCP: established only
-          else { if (rem ~ /:0000$/) continue }          # UDP: connected only
+          st = F[4]; loc = F[2]; rem = F[3]; ino = F[10]
+          if (is_tcp) {
+            sc = state_class(st)
+            # LISTEN: no remote endpoint, not an outbound. CLOSE: transient
+            # dead socket. OTHER: unknown state, skip rather than emit noise.
+            if (sc == "LISTEN" || sc == "OTHER" || st == "07") continue
+          } else {
+            if (rem ~ /:0000$/) continue                # UDP: connected only
+            sc = "ESTABLISHED"                          # UDP has no states
+          }
           if (ino == "" || ino == "0") continue
           pid = (ino in inopid) ? inopid[ino] : ""
           if (mode == "exclude-process" && pid != "" && in_unit(pid) == 1) continue
           pname = (pid == "") ? "-" : comm_of(pid)
-          print "outbound", pname, rstr(rem)
+          remote = rstr(rem)
+          # Normalized row — DROP src + state, de-dup by (comm, remote). One
+          # row per (comm, dst:port) regardless of fine state or src ephemerals.
+          print "outbound", pname, remote
+          # Raw row — KEEP proto + state_class bucket + src for forensics.
+          # state_class (not fine state) means TIME_WAIT vs CLOSE_WAIT both
+          # appear as CLOSING — within-bucket churn is invisible in raw too.
+          # Across-bucket churn (ESTABLISHED -> CLOSING) is legitimately
+          # captured: raw is for forensic context, NOT byte-identicalness.
+          print "RAW: outbound_raw", proto, sc, pname, rstr(loc), remote
         }
         close(f)
       }
