@@ -97,9 +97,7 @@ process_ancestry_analyze() {
     [ -n "$path" ] || continue
     emit_finding "$CHECK_NAME" temp_exec WARN \
       "new executable file in a world-writable temp dir: $path" "absent" "$path" false
-  done <<< "$(comm -13 \
-      <(awk '$1=="tmpexec"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="tmpexec"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" tmpexec)"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

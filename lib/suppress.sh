@@ -24,14 +24,6 @@ suppress_token_path() {
   printf '%s' "${ONIONWARDEN_SUPPRESS_TOKEN:-$(onionwarden_conf_dir)/suppress.token}"
 }
 
-# _supp_field FILE KEY — read a scalar from the flat-JSON suppression token.
-_supp_field() {
-  awk -v k="$2" '
-    { if (match($0, "\"" k "\"[ ]*:[ ]*\"")) {
-        r = substr($0, RSTART + RLENGTH); q = index(r, "\"")
-        print substr(r, 1, q - 1); exit } }' "$1"
-}
-
 # suppress_physical_active -> 0 if a valid signed physical-access window is in
 # effect right now. Emits nothing on the happy path; warns on a rejected token.
 suppress_physical_active() {
@@ -45,11 +37,11 @@ suppress_physical_active() {
     return 1
   fi
 
-  host=$(_supp_field "$tok" host_id)
-  scope=$(_supp_field "$tok" scope)
-  opened=$(_supp_field "$tok" opened_at)
-  expires=$(_supp_field "$tok" expires_at)
-  nonce=$(_supp_field "$tok" nonce)
+  host=$(json_field "$tok" host_id)
+  scope=$(json_field "$tok" scope)
+  opened=$(json_field "$tok" opened_at)
+  expires=$(json_field "$tok" expires_at)
+  nonce=$(json_field "$tok" nonce)
 
   [ "$host" = "$(cfg_get host_id)" ] || { log_warn "suppress: token host mismatch"; return 1; }
   [ "$scope" = "physical" ] || return 1
@@ -84,8 +76,8 @@ suppress_describe() {
   if [ ! -f "$tok" ]; then printf 'no suppression token installed\n'; return 0; fi
   if suppress_physical_active; then
     printf 'ACTIVE physical-access window: reason=%s operator=%s expires=%s\n' \
-      "$(_supp_field "$tok" reason)" "$(_supp_field "$tok" operator)" \
-      "$(_supp_field "$tok" expires_at)"
+      "$(json_field "$tok" reason)" "$(json_field "$tok" operator)" \
+      "$(json_field "$tok" expires_at)"
   else
     printf 'token present but NOT active (expired, replayed, or invalid signature)\n'
   fi

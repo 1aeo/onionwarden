@@ -77,9 +77,7 @@ filesystem_analyze() {
       [ -n "$path" ] || continue
       emit_finding "$CHECK_NAME" world_writable CRIT \
         "new world-writable ${kind#ww} in a system path: $path" "absent" "$path" false
-    done <<< "$(comm -13 \
-        <(awk -v k="$kind" '$1==k{print $2}' "$base_file" | sort -u) \
-        <(awk -v k="$kind" '$1==k{print $2}' "$cur_file" | sort -u))"
+    done <<< "$(state_added_field "$base_file" "$cur_file" "$kind")"
   done
 
   # Immutable / append-only attribute changes.

@@ -157,9 +157,7 @@ network_deep_analyze() {
     emit_finding "$CHECK_NAME" outbound WARN \
       "outbound connection not seen at baseline: $(printf '%s' "$line" | sed 's/^outbound //')" \
       "absent" "$line" false
-  done <<< "$(comm -13 \
-      <(grep '^outbound ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^outbound ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" outbound)"
 
   # nft ruleset.
   local bn cn
@@ -180,18 +178,14 @@ network_deep_analyze() {
       emit_finding "$CHECK_NAME" "$rec" "$sev" \
         "new $rec since baseline: $(printf '%s' "$line" | sed "s/^$rec //")" \
         "absent" "$line" false
-    done <<< "$(comm -13 \
-        <(grep "^$rec " "$base_file" 2>/dev/null | sort -u) \
-        <(grep "^$rec " "$cur_file" 2>/dev/null | sort -u))"
+    done <<< "$(state_added_prefix "$base_file" "$cur_file" "$rec")"
   done
   # Gateway MAC change (ARP spoof / new router).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     emit_finding "$CHECK_NAME" arp WARN \
       "gateway ARP entry changed: $(printf '%s' "$line" | sed 's/^arp //')" "baseline" "changed" false
-  done <<< "$(comm -13 \
-      <(grep '^arp ' "$base_file" 2>/dev/null | sort -u) \
-      <(grep '^arp ' "$cur_file" 2>/dev/null | sort -u))"
+  done <<< "$(state_added_prefix "$base_file" "$cur_file" arp)"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

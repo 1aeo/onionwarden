@@ -81,18 +81,14 @@ auth_log_analyze() {
       emit_finding "$CHECK_NAME" sudo_usage CRIT \
         "sudo used by '$user' — not in expected_admins" "absent" "$user" true
     fi
-  done <<< "$(comm -13 \
-      <(awk '$1=="sudouser"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="sudouser"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" sudouser)"
 
   # New SSH source IP -> WARN.
   while IFS= read -r ip; do
     [ -n "$ip" ] || continue
     emit_finding "$CHECK_NAME" ssh_logins WARN \
       "SSH connection from a source IP not seen at baseline: $ip" "absent" "$ip" false
-  done <<< "$(comm -13 \
-      <(awk '$1=="sshsrc"{print $2}' "$base_file" | sort -u) \
-      <(awk '$1=="sshsrc"{print $2}' "$cur_file" | sort -u))"
+  done <<< "$(state_added_field "$base_file" "$cur_file" sshsrc)"
 
   # Journal corruption -> WARN.
   cv=$(awk '$1=="journal"&&$2=="verify"{print $3}' "$cur_file" | head -n1)
