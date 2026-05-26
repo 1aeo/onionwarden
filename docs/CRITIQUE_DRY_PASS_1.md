@@ -177,8 +177,15 @@ Replace `awk -F= '$1=="K"{print $2}' F | head -n1` (3 callsites in
 `lib/fatal.sh`, plus 1 in `bin/onionwarden-onboard:430`).
 
 ```bash
-# kv_read FILE KEY — read `KEY=VALUE` (first match) from a flat key=value file.
-kv_read() { awk -F= -v k="$2" '$1==k{print $2; exit}' "$1" 2>/dev/null; }
+# kv_read FILE KEY — read first `KEY=VALUE` from a flat key=value file.
+# VALUE may contain `=`; everything after the first `=` is preserved
+# (the old `-F=` split would truncate `KEY=a=b` to `a`).
+kv_read() {
+  awk -v k="$2" '
+    { p = k "="
+      if (substr($0, 1, length(p)) == p) { print substr($0, length(p) + 1); exit } }
+  ' "$1" 2>/dev/null
+}
 ```
 
 Callsites refactored:
