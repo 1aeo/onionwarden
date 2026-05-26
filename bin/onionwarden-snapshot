@@ -479,6 +479,31 @@ fi
 # END mode-specific paths — POST-PROCESSING IS COMMON
 # =============================================================================
 
+# Relocate `RAW: ...` lines (forensic deep-dive context emitted by collectors
+# alongside their normalized rows — e.g. network_deep's full 5-tuple with src
+# port + TCP state class) out of `.current` and into `raw/<check>.raw`. The
+# `.current` file is what the analyzer compares for tamper detection and what
+# the parallel-runs-byte-identical test asserts on: keeping it normalized-only
+# means a stable peer set produces byte-identical `.current` files across
+# back-to-back snapshots, while the raw companion preserves forensic detail
+# for operators investigating an alert. raw/ is not part of any byte-identity
+# comparison. This is a generic mechanism — any check can use the `RAW: ` line
+# prefix; the prefix is stripped on relocation.
+mkdir -p "$OUT/raw"
+for f in "$OUT"/*.current; do
+  [ -f "$f" ] || continue
+  if grep -q '^RAW: ' "$f" 2>/dev/null; then
+    n=$(basename "$f" .current)
+    grep '^RAW: ' "$f" | sed 's/^RAW: //' > "$OUT/raw/$n.raw"
+    # `grep -v` exits 1 when every line matches (file is RAW-only); without
+    # the `|| :` guard the `&&` short-circuit would skip the mv and leave the
+    # RAW: lines in .current. We want unconditional removal regardless of
+    # whether any non-RAW lines remain.
+    grep -v '^RAW: ' "$f" > "$f.tmp" || :
+    mv "$f.tmp" "$f"
+  fi
+done
+
 # profile.current mirrors profile.state (the dispatcher needs both).
 if [ -f "$OUT/profile.current" ]; then
   cp "$OUT/profile.current" "$OUT/profile.state"
