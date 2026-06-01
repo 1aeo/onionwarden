@@ -37,6 +37,18 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
 - **install.sh** — lays the tree from a reviewable answers file, pins the
   pubkey hash, stages systemd units, applies `chattr +i` where the FS supports
   it, leaves the host bootstrapping. Tested into a scratch prefix.
+- **`onionwarden-virt-inventory`** (OPERATOR_DECISIONS §6) — self-contained
+  per-host virtualization inventory: `systemd-detect-virt` (overall/container/vm),
+  DMI vendor/product/BIOS (sysfs + `dmidecode -s system-manufacturer`), cgroup
+  version + pid-1 cgroup, namespace set + userns status → one JSON object with a
+  bare-metal/vm/container/unknown `verdict`. Sources nothing from `lib/` so it
+  streams over `ssh HOST 'bash -s'` (no install on the target); read-only;
+  degrades gracefully (root-only/absent probes land in `degraded`, never fatal);
+  captures NO serials/UUIDs (no PII). `--fixture-dir` replay makes the
+  verdict/JSON logic unit-testable on macOS. Fleet paste-block +
+  results-rollup in `docs/virt-inventory.md`. Tested by
+  `tests/test_virt_inventory.py` + `tests/bats/test_virt_inventory.bats`. (Ships
+  the tool; the captured fleet inventory remains an operator run — §6.)
 
 ## What is stubbed or deferred (and why)
 
