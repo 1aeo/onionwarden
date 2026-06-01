@@ -1,30 +1,371 @@
 #!/usr/bin/env bash
 # bin/onionwarden-fleet-diff — cross-fleet baseline diff report (PLAN §6 Phase 3).
 #
-# PLACEHOLDER — this is a Phase-3 deliverable and is out of scope for the
-# current Phase 0-2 build. It is shipped as a stub so the CLI surface and the
-# §3.3 layout are complete; the full implementation lands in Phase 3.
+# OPERATOR-SIDE tool — run from the receiver host or an admin box with reach to
+# the fleet's baselines, NOT a per-host check. It reads each host's per-host
+# baseline (the same `manifest.json` + `state/<check>.state` tree that
+# `onionwarden-baseline collect` produces and the receiver stores under
+# `~/onionwarden/<host_id>/baseline/`), computes the set-difference of key
+# integrity indicators ACROSS hosts, groups the result by role, and emits a
+# hierarchical diff report.
 #
-# When built, fleet-diff is an OPERATOR-SIDE tool (run from the receiver or an
-# admin box, not a per-host check): it pulls each host's signed baseline
-# manifest, normalises module/port/SUID/sshd/kernel posture, and emits a
-# Markdown diff grouped by host and role so per-role anomalies stand out.
+# It is NOT a convergence tool: a tor-relay and an eval-host SHOULD differ, and
+# even two relays differ in ORPort etc. Its job is to surface deltas WITHIN a
+# role so anomalies stand out — one tor-relay carrying a kernel module the other
+# seven lack, one host listening on a port its role-peers don't (PLAN §6).
+#
+#   onionwarden-fleet-diff [--fleet-dir DIR] [--from-receiver TARGET]
+#                          [--roles-map FILE] [--pubkey FILE]
+#                          [--indicators "taint modules ports suid ssh"]
+#                          [--format md|json] [--verbose]
+#                          [--strict|--no-strict] [--fail-on-divergence]
+#
+# Default baseline source: $ONIONWARDEN_FLEET_DIR, else ~/onionwarden — the
+# receiver's per-host tree. --from-receiver USER@HOST:PATH rsyncs that tree to a
+# local scratch dir first (the "pulled over SSH" default), then diffs locally.
+#
+# Exit codes:
+#   0  report emitted, no error
+#   1  usage error
+#   3  a host's baseline is missing / unreadable / (with --pubkey) unverified
+#   4  --fail-on-divergence set and at least one within-role divergence found
 set -euo pipefail
 
-cat >&2 <<'EOF'
-onionwarden-fleet-diff: NOT YET IMPLEMENTED (Phase 3).
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
+# shellcheck source=lib/common.sh
+. "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/baseline.sh
+. "$ONIONWARDEN_ROOT/lib/baseline.sh"
 
-This is an operator-side cross-fleet baseline diff, scheduled for Phase 3 of
-the rollout (PLAN §6). The current build covers Phases 0-2 only.
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-Phase-3 scope:
-  - pull each host's signed baseline manifest from the receiver
-  - normalise loaded modules / listening ports / SUID set / sshd posture /
-    kernel + taint / installed-package set
-  - emit a Markdown report grouped by host and role, surfacing the deltas
-    WITHIN a role (one tor-relay carrying a module the other seven lack, etc.)
+# Default indicator set (PLAN §6: kernel taint, modules, listeners, SUID, sshd).
+# These are check names whose state file lives at state/<name>.state. Friendly
+# aliases (kernel-taint, listeners, sshd) map onto the canonical check names.
+DEFAULT_INDICATORS="taint modules ports suid ssh"
 
-Until then, compare two single hosts with:
-  onionwarden-baseline diff --baseline <dirA> --candidate <dirB>
+fleet_dir="${ONIONWARDEN_FLEET_DIR:-$HOME/onionwarden}"
+from_receiver="" roles_map="" pubkey="" indicators="$DEFAULT_INDICATORS"
+format="md" verbose="no" strict="yes" fail_on_div="no"
+ssh_opts=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fleet-dir)     fleet_dir=$2; shift 2 ;;
+    --from-receiver) from_receiver=$2; shift 2 ;;
+    --roles-map)     roles_map=$2; shift 2 ;;
+    --pubkey)        pubkey=$2; shift 2 ;;
+    --indicators)    indicators=$2; shift 2 ;;
+    --format)        format=$2; shift 2 ;;
+    --ssh-opt)       ssh_opts="$ssh_opts $2"; shift 2 ;;
+    --verbose)       verbose="yes"; shift ;;
+    --strict)        strict="yes"; shift ;;
+    --no-strict)     strict="no"; shift ;;
+    --fail-on-divergence) fail_on_div="yes"; shift ;;
+    -h|--help)       usage 0 ;;
+    *) printf 'onionwarden-fleet-diff: unknown argument: %s\n' "$1" >&2; usage 1 ;;
+  esac
+done
+
+case "$format" in md|json) ;; *) die "unknown --format: $format (want md|json)" ;; esac
+
+# Map a friendly indicator alias onto the on-disk check/state-file name.
+indicator_state_name() {
+  case "$1" in
+    kernel-taint|taint) printf 'taint' ;;
+    listeners|listening-ports|ports) printf 'ports' ;;
+    sshd|sshd-config|ssh) printf 'ssh' ;;
+    modules|module) printf 'modules' ;;
+    suid|suid-sgid) printf 'suid' ;;
+    *) printf '%s' "$1" ;;   # pass through any other check name verbatim
+  esac
+}
+
+# Resolve a host directory to the directory that actually holds state/.
+# Accepts either a baseline dir (state/ directly inside) or the receiver layout
+# (<host>/baseline/state/). Prints the resolved dir, or nothing if none.
+resolve_state_dir() {
+  local hd=$1
+  if [ -d "$hd/state" ]; then printf '%s' "$hd"; return 0; fi
+  if [ -d "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
+  return 1
+}
+
+# --- optionally pull the fleet tree from the receiver over SSH/rsync ---------
+if [ -n "$from_receiver" ]; then
+  require_cmd rsync || die "--from-receiver needs rsync on this box"
+  pulled=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-fleet.XXXXXX")
+  # shellcheck disable=SC2086
+  log_info "pulling fleet baselines from $from_receiver into $pulled"
+  if ! rsync -az ${ssh_opts:+-e "ssh$ssh_opts"} "$from_receiver"/ "$pulled"/; then
+    die "rsync from $from_receiver failed"
+  fi
+  fleet_dir="$pulled"
+fi
+
+[ -d "$fleet_dir" ] || die "fleet-dir does not exist: $fleet_dir"
+
+# --- discover hosts ----------------------------------------------------------
+# One subdirectory per host (skip dotfiles and receiver-reserved _-dirs so this
+# can run straight against a live ~/onionwarden receiver tree).
+hosts=""
+for d in "$fleet_dir"/*/; do
+  [ -d "$d" ] || continue
+  name=$(basename "$d")
+  case "$name" in .*|_*) continue ;; esac
+  hosts="$hosts $name"
+done
+hosts=$(printf '%s\n' $hosts | sort -u | tr '\n' ' ')
+host_count=$(printf '%s\n' $hosts | grep -c . || true)
+
+# --- role lookup -------------------------------------------------------------
+# Precedence: --roles-map line `host role` > per-host `role` file > host.conf
+# `role = "..."` > "unknown".
+role_of() {
+  local host=$1 r=""
+  if [ -n "$roles_map" ] && [ -f "$roles_map" ]; then
+    r=$(awk -v h="$host" '$1==h{print $2; exit}' "$roles_map" 2>/dev/null || true)
+  fi
+  if [ -z "$r" ] && [ -f "$fleet_dir/$host/role" ]; then
+    r=$(tr -d ' \n\r\t' < "$fleet_dir/$host/role" 2>/dev/null || true)
+  fi
+  if [ -z "$r" ]; then
+    local hc="$fleet_dir/$host/host.conf"
+    [ -f "$hc" ] || hc="$fleet_dir/$host/baseline/host.conf"
+    if [ -f "$hc" ]; then
+      r=$(grep -E '^[[:space:]]*role' "$hc" 2>/dev/null | head -n1 \
+        | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' || true)
+    fi
+  fi
+  [ -n "$r" ] || r="unknown"
+  printf '%s' "$r"
+}
+
+# --- validate every host's baseline (and optionally verify signature) --------
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-fleetdiff.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+missing=""
+for host in $hosts; do
+  sd=$(resolve_state_dir "$fleet_dir/$host" || true)
+  if [ -z "$sd" ]; then
+    missing="$missing $host"
+    continue
+  fi
+  printf '%s' "$sd" > "$WORK/$host.statedir"
+  if [ -n "$pubkey" ]; then
+    # Per-host throwaway state dir: baseline_verify's anti-rollback marker
+    # (R1-1) is keyed on ONIONWARDEN_STATE_DIR. Diffing N hosts in one process
+    # against the shared default would make host B's older captured_at look
+    # like a rollback of host A. Isolate it so each verify is independent and
+    # the operator box's real /var/lib/onionwarden is never touched.
+    if ! ONIONWARDEN_STATE_DIR="$WORK/$host.vstate" \
+         baseline_verify "$sd" "$pubkey" >/dev/null 2>&1; then
+      log_err "baseline signature/integrity check FAILED for host '$host' ($sd)"
+      missing="$missing $host"
+    fi
+  fi
+done
+
+if [ -n "$missing" ]; then
+  log_err "missing/unverified baseline for:${missing}"
+  if [ "$strict" = "yes" ]; then
+    printf 'onionwarden-fleet-diff: refusing to report — baseline problem for:%s\n' "$missing" >&2
+    printf 'Re-run with --no-strict to diff the hosts that DO have a usable baseline.\n' >&2
+    exit 3
+  fi
+  log_warn "--no-strict: excluding those hosts from the diff"
+  # drop missing hosts from the host list
+  new=""
+  for host in $hosts; do
+    case " $missing " in *" $host "*) continue ;; esac
+    new="$new $host"
+  done
+  hosts=$(printf '%s\n' $new | tr '\n' ' ')
+  host_count=$(printf '%s\n' $hosts | grep -c . || true)
+fi
+
+# Normalise the indicator list to canonical state-file names.
+ind_canon=""
+for i in $indicators; do
+  ind_canon="$ind_canon $(indicator_state_name "$i")"
+done
+indicators=$(printf '%s\n' $ind_canon | tr '\n' ' ')
+
+# --- build the per-(role,indicator) membership tables ------------------------
+# roles present, sorted, unique.
+roles=""
+for host in $hosts; do
+  roles="$roles $(role_of "$host")"
+done
+roles=$(printf '%s\n' $roles | sort -u | tr '\n' ' ')
+
+# hosts_in_role ROLE -> space-separated host list
+hosts_in_role() {
+  local want=$1 host out=""
+  for host in $hosts; do
+    [ "$(role_of "$host")" = "$want" ] && out="$out $host"
+  done
+  printf '%s' "${out# }"
+}
+
+# For one (role, indicator): write a membership table to stdout, one row per
+# distinct state line: "<count>\t<line>\t<space-separated present hosts>".
+# Rows are sorted ascending by count (rarest — most anomalous — first).
+membership_table() {
+  local role=$1 ind=$2; shift 2
+  local rhosts host sd sf tmp
+  rhosts=$(hosts_in_role "$role")
+  tmp="$WORK/.member.$$"
+  : > "$tmp"
+  for host in $rhosts; do
+    sd=$(cat "$WORK/$host.statedir")
+    sf="$sd/state/$ind.state"
+    [ -f "$sf" ] || continue
+    # host<TAB>line ; skip blank lines.
+    sort -u "$sf" | while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\t%s\n' "$host" "$line"
+    done >> "$tmp"
+  done
+  awk -F'\t' '
+    { line=$2; cnt[line]++; who[line]=who[line] " " $1 }
+    END { for (l in cnt) printf "%d\t%s\t%s\n", cnt[l], l, who[l] }
+  ' "$tmp" | sort -t"$(printf '\t')" -k1,1n -k2
+  rm -f "$tmp"
+}
+
+absent_hosts() {  # ROLE "present h1 h2" -> hosts in role NOT in present set
+  local role=$1 present=$2 host out=""
+  for host in $(hosts_in_role "$role"); do
+    case " $present " in *" $host "*) ;; *) out="$out $host" ;; esac
+  done
+  printf '%s' "${out# }"
+}
+
+# --- emit --------------------------------------------------------------------
+divergence_total=0
+
+emit_md() {
+  printf '# onionwarden fleet diff\n\n'
+  printf -- '- generated: `%s`\n' "$(now_iso)"
+  printf -- '- fleet-dir: `%s`\n' "$fleet_dir"
+  printf -- '- hosts: %s\n' "$host_count"
+  printf -- '- signature verification: %s\n' \
+    "$([ -n "$pubkey" ] && printf 'ON (--pubkey %s)' "$pubkey" || printf 'OFF — baselines UNVERIFIED')"
+  printf -- '- indicators: `%s`\n' "$(printf '%s' "$indicators" | sed 's/^ *//;s/ *$//')"
+  printf '\n'
+  if [ "$host_count" -eq 0 ]; then
+    printf '_No hosts found under the fleet directory — nothing to compare._\n'
+    return 0
+  fi
+
+  local role rhosts n ind label
+  for role in $roles; do
+    rhosts=$(hosts_in_role "$role")
+    n=$(printf '%s\n' $rhosts | grep -c . || true)
+    printf '## role: `%s` — %s host%s\n\n' "$role" "$n" "$([ "$n" -eq 1 ] && printf '' || printf 's')"
+    printf 'hosts: %s\n\n' "$rhosts"
+    if [ "$n" -eq 1 ]; then
+      printf '_Single host in this role — nothing to cross-compare; inventory only._\n\n'
+    fi
+    for ind in $indicators; do
+      printf '### %s\n\n' "$ind"
+      local common=0 divs=0 rows
+      rows=$(membership_table "$role" "$ind")
+      if [ -z "$rows" ]; then
+        printf '_no state captured for this indicator on any host in the role_\n\n'
+        continue
+      fi
+      # iterate rows
+      local IFS_save=$IFS
+      while IFS="$(printf '\t')" read -r cnt line present; do
+        [ -n "$cnt" ] || continue
+        present=$(printf '%s' "$present" | sed 's/^ *//')
+        if [ "$cnt" -eq "$n" ]; then
+          common=$(( common + 1 ))
+          [ "$verbose" = "yes" ] && printf -- '- ✅ all %s: `%s`\n' "$n" "$line"
+        else
+          divs=$(( divs + 1 ))
+          divergence_total=$(( divergence_total + 1 ))
+          local absent flag
+          absent=$(absent_hosts "$role" "$present")
+          # minority presence (< half the role) reads as the more anomalous case
+          if [ $(( cnt * 2 )) -lt "$n" ]; then flag='⚠'; else flag='•'; fi
+          printf -- '- %s `%s` — on %s/%s: %s — absent on: %s\n' \
+            "$flag" "$line" "$cnt" "$n" "$present" "${absent:-—}"
+        fi
+      done <<EOF
+$rows
 EOF
-exit 64
+      IFS=$IFS_save
+      if [ "$n" -gt 1 ]; then
+        printf '\n_common to all %s hosts: %s line(s)%s; within-role divergences: %s_\n\n' \
+          "$n" "$common" "$([ "$verbose" = yes ] && printf '' || printf ' (hidden — pass --verbose)')" "$divs"
+      else
+        printf '\n_inventory: %s line(s)_\n\n' "$common"
+      fi
+    done
+  done
+  printf -- '---\n\n'
+  printf '**fleet summary:** %s within-role divergence(s) across %s host(s) in %s role(s).\n' \
+    "$divergence_total" "$host_count" "$(printf '%s\n' $roles | grep -c . || true)"
+}
+
+emit_json() {
+  local role rhosts n ind first_role=1 first_ind first_row
+  printf '{'
+  printf '"schema":"onionwarden-fleet-diff-v1",'
+  printf '"generated":"%s",' "$(json_escape "$(now_iso)")"
+  printf '"fleet_dir":"%s",' "$(json_escape "$fleet_dir")"
+  printf '"verified":%s,' "$([ -n "$pubkey" ] && printf true || printf false)"
+  printf '"host_count":%s,' "$host_count"
+  printf '"indicators":"%s",' "$(json_escape "$(printf '%s' "$indicators" | sed 's/^ *//;s/ *$//')")"
+  printf '"roles":['
+  for role in $roles; do
+    [ "$first_role" -eq 1 ] || printf ','
+    first_role=0
+    rhosts=$(hosts_in_role "$role")
+    n=$(printf '%s\n' $rhosts | grep -c . || true)
+    printf '{"role":"%s","host_count":%s,"hosts":[' "$(json_escape "$role")" "$n"
+    local fh=1 h
+    for h in $rhosts; do [ "$fh" -eq 1 ] || printf ','; fh=0; printf '"%s"' "$(json_escape "$h")"; done
+    printf '],"indicators":{'
+    first_ind=1
+    for ind in $indicators; do
+      [ "$first_ind" -eq 1 ] || printf ','
+      first_ind=0
+      printf '"%s":{"divergences":[' "$(json_escape "$ind")"
+      first_row=1
+      local rows
+      rows=$(membership_table "$role" "$ind")
+      local IFS_save=$IFS
+      while IFS="$(printf '\t')" read -r cnt line present; do
+        [ -n "$cnt" ] || continue
+        [ "$cnt" -eq "$n" ] && continue
+        divergence_total=$(( divergence_total + 1 ))
+        present=$(printf '%s' "$present" | sed 's/^ *//')
+        local absent
+        absent=$(absent_hosts "$role" "$present")
+        [ "$first_row" -eq 1 ] || printf ','
+        first_row=0
+        printf '{"line":"%s","present_count":%s,"present":"%s","absent":"%s"}' \
+          "$(json_escape "$line")" "$cnt" "$(json_escape "$present")" "$(json_escape "$absent")"
+      done <<EOF
+$rows
+EOF
+      IFS=$IFS_save
+      printf ']}'
+    done
+    printf '}}'
+  done
+  printf '],"divergence_total":%s}\n' "$divergence_total"
+}
+
+if [ "$format" = "json" ]; then emit_json; else emit_md; fi
+
+if [ "$fail_on_div" = "yes" ] && [ "$divergence_total" -gt 0 ]; then
+  exit 4
+fi
+exit 0
