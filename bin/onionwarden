@@ -11,6 +11,7 @@
 #   onionwarden suppress ...               open a physical-access maintenance window
 #   onionwarden upgrade BUNDLE             apply a signed update bundle
 #   onionwarden fleet-diff ...             cross-fleet baseline diff (operator-side)
+#   onionwarden canary-status ...          Phase-4 canary rollout health + gate
 #   onionwarden sign ...                   off-box Ed25519 signing
 #   onionwarden version | help
 set -euo pipefail
@@ -33,13 +34,14 @@ case "$sub" in
   suppress)        exec "$_bin_dir/onionwarden-suppress" "$@" ;;
   upgrade)         exec "$_bin_dir/onionwarden-upgrade" "$@" ;;
   fleet-diff)      exec "$_bin_dir/onionwarden-fleet-diff" "$@" ;;
+  canary-status)   exec "$_bin_dir/onionwarden-canary-status" "$@" ;;
   sign)            exec "$_bin_dir/onionwarden-sign" "$@" ;;
   version)
     if [ -f "$_bin_dir/../VERSION" ]; then cat "$_bin_dir/../VERSION"; else echo unknown; fi ;;
   help|-h|--help)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)
     printf 'onionwarden: unknown subcommand: %s\n\n' "$sub" >&2
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 1 ;;
 esac
