@@ -114,7 +114,9 @@ def read_events(host_dir):
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            t = _parse_ts(ev.get("recv_ts")) or _parse_ts(ev.get("ts"))
+            t = _parse_ts(ev.get("recv_ts"))
+            if t is None:
+                t = _parse_ts(ev.get("ts"))
             yield ev, t
 
 
