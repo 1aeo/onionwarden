@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# bin/onionwarden-virt-inventory — per-host virtualization inventory
+# (OPERATOR_DECISIONS §6, ⚠ HIGH-RISK). Emits ONE JSON object describing whether
+# a host is bare-metal / a VM / a container, plus the DMI + cgroup/namespace
+# state that decision rests on.
+#
+# Why: §6 inventoried `relay-b` ONLY. The VM-vs-bare-metal status of every relay
+# drives (a) the Phase-0 offline trust-establishment method — disk-snapshot scan
+# for a VM vs. IPMI / live-USB for bare metal — and (b) whether `chattr +i`
+# works (FS-dependent). Without it the offline scan cannot be planned.
+#
+# SELF-CONTAINED on purpose: it sources nothing from lib/, so the canonical way
+# to run it across the fleet is to STREAM it over SSH — nothing is installed on
+# the target:
+#
+#     ssh <host> 'bash -s' < bin/onionwarden-virt-inventory > inv/<host>.json
+#
+# Read-only: it only runs detection commands and reads /sys + /proc. Degrades
+# gracefully when a probe needs root (dmidecode) or is absent — the missing
+# probe is listed under "degraded", never fatal. Captures NO serial numbers or
+# UUIDs (no PII) — only vendor / product / BIOS-version strings.
+#
+# Usage:
+#   onionwarden-virt-inventory [--host NAME] [--fixture-dir DIR]
+# Options:
+#   --host NAME        host_id label (default: `hostname`)
+#   --fixture-dir DIR  read each probe from a file in DIR instead of running it
+#                      live (test/replay mode; see the file names in probe()).
+#
+# Streamed via `bash -s`, BASH_SOURCE[0] is unbound under `set -u`, so we run
+# without -u (same reason onionwarden-snapshot's bundle does).
+set -o pipefail
+
+HOST="" FIXDIR=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host)        HOST=$2; shift 2 ;;
+    --fixture-dir) FIXDIR=$2; shift 2 ;;
+    -h|--help)     sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) printf 'onionwarden-virt-inventory: unknown argument: %s\n' "$1" >&2; exit 1 ;;
+  esac
+done
+[ -n "$HOST" ] || HOST=$(hostname 2>/dev/null || printf 'unknown')
+
+NOW="${ONIONWARDEN_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)}"
+DMI_DIR="${ONIONWARDEN_DMI_DIR:-/sys/class/dmi/id}"
+PROC="${ONIONWARDEN_PROC:-/proc}"
+
+# DEGRADED is assembled in the MAIN shell after probing — probe functions run
+# inside $(...) subshells, so any append from there would be lost.
+DEGRADED=""
+note_degraded() { DEGRADED="$DEGRADED${DEGRADED:+|}$1"; }
+
+# json_escape — minimal, self-contained (no lib/common.sh).
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037'
+}
+
+# A probe reads a fixture file if --fixture-dir is set and the file exists,
+# otherwise runs the live command. Returns "" on any failure (caller decides).
+fixture() { [ -n "$FIXDIR" ] && [ -f "$FIXDIR/$1" ] && cat "$FIXDIR/$1"; }
+have_fixture() { [ -n "$FIXDIR" ] && [ -f "$FIXDIR/$1" ]; }
+
+# --- systemd-detect-virt --------------------------------------------------
+# Returns the bare string; "none" when not virtualized; exit 1 maps to "none".
+detect_virt() {  # $1 = ""|--container|--vm ; fixture file name $2
+  if have_fixture "$2"; then fixture "$2"; return 0; fi
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    systemd-detect-virt $1 2>/dev/null || printf 'none'
+  else
+    printf 'unknown'
+  fi
+}
+
+DV_OVERALL=$(detect_virt "" detect_virt)
+DV_CONTAINER=$(detect_virt --container detect_virt_container)
+DV_VM=$(detect_virt --vm detect_virt_vm)
+[ -n "$DV_OVERALL" ] || DV_OVERALL="none"
+[ -n "$DV_CONTAINER" ] || DV_CONTAINER="none"
+[ -n "$DV_VM" ] || DV_VM="none"
+
+# --- DMI (sysfs first; dmidecode for system-manufacturer) -----------------
+dmi_sysfs() {  # $1 = dmi file (product_name|sys_vendor|bios_version), fixture $2
+  if have_fixture "$2"; then fixture "$2"; return 0; fi
+  if [ -r "$DMI_DIR/$1" ]; then
+    tr -d '\n' < "$DMI_DIR/$1" 2>/dev/null
+  else
+    printf ''
+  fi
+}
+DMI_PRODUCT=$(dmi_sysfs product_name dmi_product_name)
+DMI_VENDOR=$(dmi_sysfs sys_vendor dmi_sys_vendor)
+DMI_BIOS=$(dmi_sysfs bios_version dmi_bios_version)
+
+dmi_manufacturer() {
+  if have_fixture dmi_system_manufacturer; then fixture dmi_system_manufacturer; return 0; fi
+  if command -v dmidecode >/dev/null 2>&1; then
+    dmidecode -s system-manufacturer 2>/dev/null | tr -d '\n'
+  else
+    printf ''
+  fi
+}
+DMI_MANUF=$(dmi_manufacturer)
+
+# --- cgroup ----------------------------------------------------------------
+cgroup_version() {
+  if have_fixture cgroup_version; then fixture cgroup_version; return 0; fi
+  # v2: /sys/fs/cgroup/cgroup.controllers exists. v1: /sys/fs/cgroup/* per ctrl.
+  if [ -f /sys/fs/cgroup/cgroup.controllers ]; then printf 'v2'
+  elif [ -d /sys/fs/cgroup/memory ] || [ -d /sys/fs/cgroup/pids ]; then
+    [ -f /sys/fs/cgroup/cgroup.controllers ] && printf 'hybrid' || printf 'v1'
+  else printf 'unknown'; fi
+}
+CG_VERSION=$(cgroup_version)
+pid1_cgroup() {
+  if have_fixture proc_1_cgroup; then fixture proc_1_cgroup; return 0; fi
+  if [ -r "$PROC/1/cgroup" ]; then head -n1 "$PROC/1/cgroup" 2>/dev/null; else printf ''; fi
+}
+CG_PID1=$(pid1_cgroup)
+
+# --- namespaces ------------------------------------------------------------
+ns_types() {
+  if have_fixture ns_types; then fixture ns_types; return 0; fi
+  if [ -d "$PROC/self/ns" ]; then
+    ls "$PROC/self/ns" 2>/dev/null | sort | tr '\n' ' '
+  else printf ''; fi
+}
+NS_TYPES=$(ns_types)
+userns_active() {
+  if have_fixture userns_active; then fixture userns_active; return 0; fi
+  # If /proc/self/uid_map maps the full 0..4294967295 range, we're in the
+  # initial user namespace (not user-namespaced). Anything else => userns.
+  if [ -r "$PROC/self/uid_map" ]; then
+    local m
+    m=$(tr -s ' ' < "$PROC/self/uid_map" 2>/dev/null | sed 's/^ //')
+    case "$m" in
+      "0 0 4294967295") printf 'false' ;;
+      "") printf 'unknown' ;;
+      *) printf 'true' ;;
+    esac
+  else printf 'unknown'; fi
+}
+USERNS=$(userns_active)
+
+# --- degraded probes (computed in the main shell) -------------------------
+# Only meaningful for a LIVE run; in --fixture-dir mode every value came from a
+# file, so nothing is "degraded".
+if [ -z "$FIXDIR" ]; then
+  command -v systemd-detect-virt >/dev/null 2>&1 || \
+    note_degraded "systemd-detect-virt: not installed"
+  if ! command -v dmidecode >/dev/null 2>&1; then
+    note_degraded "dmidecode: not installed"
+  elif [ -z "$DMI_MANUF" ]; then
+    note_degraded "dmidecode: needs root or returned nothing"
+  fi
+  if [ -z "$DMI_VENDOR" ] && [ -z "$DMI_PRODUCT" ] && [ -z "$DMI_BIOS" ] \
+     && [ ! -r "$DMI_DIR/sys_vendor" ]; then
+    note_degraded "dmi sysfs: $DMI_DIR unreadable/absent"
+  fi
+fi
+
+# --- verdict ---------------------------------------------------------------
+# Precedence: an explicit container/vm signal from systemd-detect-virt wins;
+# else infer from DMI vendor strings; else bare-metal if everything says "none".
+vendor_is_vm() {
+  case "$1" in
+    *QEMU*|*KVM*|*VMware*|*VMW*|*VirtualBox*|*Xen*|*Bochs*|*"Microsoft Corporation"*|\
+    *Parallels*|*"Google"*|*"Amazon EC2"*|*DigitalOcean*|*Hetzner*|*"Red Hat"*|*OpenStack*|*Nutanix*)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+VERDICT="unknown" BASIS=""
+if [ "$DV_CONTAINER" != "none" ] && [ "$DV_CONTAINER" != "unknown" ]; then
+  VERDICT="container"; BASIS="systemd-detect-virt --container=$DV_CONTAINER"
+elif [ "$DV_VM" != "none" ] && [ "$DV_VM" != "unknown" ]; then
+  VERDICT="vm"; BASIS="systemd-detect-virt --vm=$DV_VM"
+elif [ "$DV_OVERALL" != "none" ] && [ "$DV_OVERALL" != "unknown" ]; then
+  VERDICT="vm"; BASIS="systemd-detect-virt=$DV_OVERALL"
+elif vendor_is_vm "$DMI_VENDOR" || vendor_is_vm "$DMI_PRODUCT" || vendor_is_vm "$DMI_MANUF"; then
+  VERDICT="vm"; BASIS="dmi-vendor=$DMI_VENDOR/$DMI_PRODUCT/$DMI_MANUF"
+elif [ "$DV_OVERALL" = "none" ] && { [ -n "$DMI_VENDOR" ] || [ -n "$DMI_PRODUCT" ]; }; then
+  VERDICT="bare-metal"; BASIS="systemd-detect-virt=none + dmi present"
+elif [ "$DV_OVERALL" = "none" ]; then
+  VERDICT="bare-metal"; BASIS="systemd-detect-virt=none"
+fi
+
+# --- emit JSON -------------------------------------------------------------
+emit_arr() {  # space-separated tokens -> JSON array
+  local first=1 t
+  printf '['
+  for t in $1; do [ "$first" -eq 1 ] || printf ','; first=0; printf '"%s"' "$(json_escape "$t")"; done
+  printf ']'
+}
+emit_degraded() {
+  local first=1 IFS='|' t
+  printf '['
+  for t in $DEGRADED; do [ "$first" -eq 1 ] || printf ','; first=0; printf '"%s"' "$(json_escape "$t")"; done
+  printf ']'
+}
+
+printf '{'
+printf '"schema":"onionwarden-virt-inventory-v1",'
+printf '"host_id":"%s",' "$(json_escape "$HOST")"
+printf '"collected_at":"%s",' "$(json_escape "$NOW")"
+printf '"verdict":"%s",' "$(json_escape "$VERDICT")"
+printf '"verdict_basis":"%s",' "$(json_escape "$BASIS")"
+printf '"systemd_detect_virt":{"overall":"%s","container":"%s","vm":"%s"},' \
+  "$(json_escape "$DV_OVERALL")" "$(json_escape "$DV_CONTAINER")" "$(json_escape "$DV_VM")"
+printf '"dmi":{"sys_vendor":"%s","product_name":"%s","bios_version":"%s","system_manufacturer":"%s"},' \
+  "$(json_escape "$DMI_VENDOR")" "$(json_escape "$DMI_PRODUCT")" \
+  "$(json_escape "$DMI_BIOS")" "$(json_escape "$DMI_MANUF")"
+printf '"cgroup":{"version":"%s","pid1":"%s"},' \
+  "$(json_escape "$CG_VERSION")" "$(json_escape "$CG_PID1")"
+printf '"namespaces":{"types":'; emit_arr "$NS_TYPES"
+printf ',"userns_active":"%s"},' "$(json_escape "$USERNS")"
+printf '"degraded":'; emit_degraded
+printf '}\n'
