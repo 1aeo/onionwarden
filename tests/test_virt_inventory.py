@@ -98,9 +98,15 @@ def test_dmi_vendor_infers_vm_when_detect_virt_says_none(tmp_path):
 
 
 def test_unknown_when_nothing_detectable(tmp_path):
+    # Must fully stub DMI too: a fixture file that is ABSENT falls through to a
+    # live /sys/class/dmi read, and CI runners are VMs whose real DMI vendor
+    # (Hyper-V/GCE) would correctly classify them "vm". Empty DMI fixtures keep
+    # the test hermetic on any host.
     fix = _fixture(tmp_path, {
         "detect_virt": "unknown", "detect_virt_container": "unknown",
         "detect_virt_vm": "unknown",
+        "dmi_sys_vendor": "", "dmi_product_name": "",
+        "dmi_bios_version": "", "dmi_system_manufacturer": "",
     })
     d = _json("mystery", fix)
     assert d["verdict"] == "unknown"
