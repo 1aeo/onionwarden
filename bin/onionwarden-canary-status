@@ -12,9 +12,10 @@ verdict against the signoff gate in docs/PHASE4_CANARY_PLAYBOOK.md:
 
 It reads the canary's append-only events.log (the receiver's copy is the
 authoritative one — it's cross-checked and the host cannot rewrite it). An
-"unexplained" alert is any WARN/CRIT finding NOT matched by the operator's
---ack-file; that file is how the operator records "I looked at this WARN and it's
-a known-benign noise-floor item," which is exactly the Phase-4 learning loop.
+"unexplained" alert is any WARN finding NOT matched by the operator's --ack-file,
+or any CRIT finding. The ack file is how the operator records "I looked at this
+WARN and it's a known-benign noise-floor item," which is exactly the Phase-4
+learning loop. CRIT findings always block the gate.
 
 Event source (one of):
   --events FILE              path to the canary's events.log
@@ -29,9 +30,9 @@ Options:
   --now-epoch E       pin "now" (UTC epoch) for deterministic runs/tests
   --format text|json
 
-ack-file lines (blank lines and #-comments ignored) match a finding if the line
-is a substring of the finding's "signal", "check", "summary", or "observed", or
-equals its run_id or seq. e.g.:
+ack-file lines (blank lines and #-comments ignored) match a WARN finding if the
+line is a substring of the finding's "signal", "check", "summary", or "observed",
+or equals its run_id or seq. e.g.:
     clock/unsynced          # NTP not yet settled on first boot — benign
     run_id=2026-05-29T...    # a specific reviewed run
     snap                     # snap-revision churn during apt week
@@ -134,7 +135,7 @@ def canary_status(events_path, args):
             warn += 1
         elif sev == "INFO":
             info += 1
-        if sev in ("WARN", "CRIT") and not is_acked(ev, acks):
+        if sev == "CRIT" or (sev == "WARN" and not is_acked(ev, acks)):
             detail = ev.get("detail") or {}
             unexplained.append({
                 "seq": ev.get("seq"), "severity": sev,
@@ -248,6 +249,10 @@ def main(argv):
 
     if args["format"] not in ("text", "json"):
         sys.stderr.write("canary-status: --format must be text|json\n"); return 2
+    if args["ack_file"] and not os.path.isfile(args["ack_file"]):
+        sys.stderr.write("canary-status: --ack-file not found: %s\n"
+                         % args["ack_file"])
+        return 2
 
     events_path = args["events"]
     if not events_path:

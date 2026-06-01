@@ -120,8 +120,9 @@ The canary must run **≥ 7 days with zero *unexplained* WARN/CRIT alerts.**
 
 - *Unexplained* ≠ *zero alerts.* On `alert_push_level=warn` you **expect** some
   WARN noise (clock-not-yet-synced on first boot, snap-revision churn during an
-  apt week). Each one you investigate and judge benign becomes an
-  **acknowledgement**, not a failure.
+  apt week). Each WARN you investigate and judge benign becomes an
+  **acknowledgement**, not a failure. CRIT findings cannot be acknowledged away;
+  they always block the gate.
 - Record acknowledgements in an ack-file (one pattern per line), which doubles as
   the seed for the host's `host.conf` allowlist / `disable_checks` tuning:
 
