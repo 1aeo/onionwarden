@@ -46,12 +46,25 @@ fp() {  # fingerprint every file under $1 (path + content), order-stable
   [[ "$output" == *"TrustedCertificateFile=/etc/onionwarden/journal/ca.crt"* ]]
 }
 
+@test "relay mTLS service drop-in loads certs through systemd credentials" {
+  run "$SHIP" --receiver-host recv.example.net --cert-dir /etc/onionwarden/journal --print
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"LoadCredential=upload.key:/etc/onionwarden/journal/upload.key"* ]]
+  [[ "$output" == *"LoadCredential=upload.crt:/etc/onionwarden/journal/upload.crt"* ]]
+  [[ "$output" == *"LoadCredential=ca.crt:/etc/onionwarden/journal/ca.crt"* ]]
+  [[ "$output" == *'--key=${CREDENTIALS_DIRECTORY}/upload.key'* ]]
+  [[ "$output" == *'--cert=${CREDENTIALS_DIRECTORY}/upload.crt'* ]]
+  [[ "$output" == *'--trust=${CREDENTIALS_DIRECTORY}/ca.crt'* ]]
+}
+
 @test "relay --http strips cert lines and uses http scheme" {
   run "$SHIP" --receiver-host recv.example.net --http --print
   [ "$status" -eq 0 ]
   [[ "$output" == *"URL=http://recv.example.net:19532"* ]]
   [[ "$output" != *"ServerKeyFile="* ]]
   [[ "$output" != *"TrustedCertificateFile="* ]]
+  [[ "$output" != *"LoadCredential="* ]]
+  [[ "$output" != *"CREDENTIALS_DIRECTORY"* ]]
 }
 
 @test "relay requires a receiver target" {
