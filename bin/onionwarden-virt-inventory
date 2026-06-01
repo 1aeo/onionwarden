@@ -67,9 +67,15 @@ have_fixture() { [ -n "$FIXDIR" ] && [ -f "$FIXDIR/$1" ]; }
 # --- systemd-detect-virt --------------------------------------------------
 # Returns the bare string; "none" when not virtualized; exit 1 maps to "none".
 detect_virt() {  # $1 = ""|--container|--vm ; fixture file name $2
+  local out
   if have_fixture "$2"; then fixture "$2"; return 0; fi
   if command -v systemd-detect-virt >/dev/null 2>&1; then
-    systemd-detect-virt $1 2>/dev/null || printf 'none'
+    if [ -n "$1" ]; then
+      out=$(systemd-detect-virt "$1" 2>/dev/null)
+    else
+      out=$(systemd-detect-virt 2>/dev/null)
+    fi
+    printf '%s' "${out:-none}"
   else
     printf 'unknown'
   fi

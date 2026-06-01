@@ -41,6 +41,15 @@ def _json(host, fixture_dir=None, env=None):
     return json.loads(r.stdout)
 
 
+def _mock_detect_virt(tmp_path, script):
+    mockbin = tmp_path / "mockbin"
+    mockbin.mkdir()
+    detect_virt = mockbin / "systemd-detect-virt"
+    detect_virt.write_text(script)
+    detect_virt.chmod(0o755)
+    return mockbin
+
+
 # --- verdicts --------------------------------------------------------------
 
 def test_kvm_vm_verdict(tmp_path):
@@ -104,6 +113,58 @@ def test_unknown_when_nothing_detectable(tmp_path):
     })
     d = _json("mystery", fix)
     assert d["verdict"] == "unknown"
+
+
+def test_live_detect_virt_none_stdout_is_not_duplicated(tmp_path):
+    """systemd-detect-virt prints 'none' but exits 1 on non-virtualized probes.
+    The live path must capture that stdout once, not append a fallback 'none'."""
+    mockbin = _mock_detect_virt(tmp_path, """#!/usr/bin/env bash
+printf 'none\\n'
+exit 1
+""")
+    dmi = _fixture(tmp_path, {
+        "sys_vendor": "Dell Inc.",
+        "product_name": "PowerEdge R640",
+        "bios_version": "2.10.2",
+    })
+
+    d = _json("bm-live", env={
+        "PATH": f"{mockbin}:{os.environ['PATH']}",
+        "ONIONWARDEN_DMI_DIR": str(dmi),
+        "ONIONWARDEN_PROC": str(tmp_path / "noproc"),
+    })
+
+    assert d["systemd_detect_virt"] == {
+        "overall": "none",
+        "container": "none",
+        "vm": "none",
+    }
+    assert d["verdict"] == "bare-metal"
+
+
+def test_live_vm_not_masked_by_container_none_probe(tmp_path):
+    mockbin = _mock_detect_virt(tmp_path, """#!/usr/bin/env bash
+case "${1:-}" in
+  --container) printf 'none\\n'; exit 1 ;;
+  --vm) printf 'kvm\\n'; exit 0 ;;
+  *) printf 'kvm\\n'; exit 0 ;;
+esac
+""")
+    dmi = _fixture(tmp_path, {
+        "sys_vendor": "Dell Inc.",
+        "product_name": "PowerEdge R640",
+        "bios_version": "2.10.2",
+    })
+
+    d = _json("vm-live", env={
+        "PATH": f"{mockbin}:{os.environ['PATH']}",
+        "ONIONWARDEN_DMI_DIR": str(dmi),
+        "ONIONWARDEN_PROC": str(tmp_path / "noproc"),
+    })
+
+    assert d["systemd_detect_virt"]["container"] == "none"
+    assert d["systemd_detect_virt"]["vm"] == "kvm"
+    assert d["verdict"] == "vm"
 
 
 # --- JSON contract ---------------------------------------------------------
