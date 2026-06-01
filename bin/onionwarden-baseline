@@ -16,6 +16,8 @@ _bin_dir=$(cd "$(dirname "$0")" && pwd)
 ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
 # shellcheck source=lib/common.sh
 . "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/stage_tracker.sh
+. "$ONIONWARDEN_ROOT/lib/stage_tracker.sh"
 # shellcheck source=lib/baseline.sh
 . "$ONIONWARDEN_ROOT/lib/baseline.sh"
 
@@ -48,18 +50,45 @@ do_collect() {
   rm -rf "$out"; mkdir -p "$out/state"
 
   log_info "collecting baseline for host '$host_id' into $out"
-  "$_bin_dir/onionwarden-detect-profile" "$out/state/profile.state" >/dev/null
+
+  # Hierarchical stage output (lib/stage_tracker.sh): "collect baseline" is the
+  # parent; the profile probe, each per-check collector, and the manifest write
+  # are nested sub-stages. stage_begin exports ONIONWARDEN_STAGE_PARENT so the
+  # detect-profile child process renders underneath this parent automatically.
+  local total_checks idx
+  total_checks=$(ls "$ONIONWARDEN_ROOT"/lib/checks/*.sh 2>/dev/null | wc -l | tr -d ' ')
+  [ -n "$total_checks" ] || total_checks=0
+  # Sub-stages: the profile probe (slot 1) plus one collector per non-profile
+  # check (profile.sh is skipped below). That is exactly total_checks sub-stages.
+  local total_sub=$total_checks
+  stage_begin 1 1 "collect baseline"
+
+  stage_begin 1 "$total_sub" "detect profile"
+  if "$_bin_dir/onionwarden-detect-profile" "$out/state/profile.state" >/dev/null; then
+    stage_ok
+  else
+    stage_fail "detect-profile exited nonzero"
+  fi
   export _PROF_FILE="$out/state/profile.state"
 
+  idx=1
   for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     [ -f "$cf" ] || continue
     name=$(basename "$cf" .sh)
     [ "$name" = "profile" ] && continue   # profile.state already written
-    if ! bash "$cf" collect --profile "$out/state/profile.state" \
+    idx=$(( idx + 1 ))
+    stage_begin "$idx" "$total_sub" "collect $name"
+    if bash "$cf" collect --profile "$out/state/profile.state" \
          > "$out/state/$name.state" 2>/dev/null; then
+      stage_ok
+    else
       log_warn "collect: check '$name' failed — state file may be incomplete"
+      stage_fail "collector exited nonzero"
     fi
   done
+
+  stage_ok   # close "collect baseline"
+  stage_summary
 
   baseline_write_manifest "$out" "$host_id"
   reason="manual baseline capture"

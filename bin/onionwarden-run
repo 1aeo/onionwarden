@@ -13,6 +13,8 @@ _bin_dir=$(cd "$(dirname "$0")" && pwd)
 ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
 # shellcheck source=lib/common.sh
 . "$ONIONWARDEN_ROOT/lib/common.sh"
+# shellcheck source=lib/stage_tracker.sh
+. "$ONIONWARDEN_ROOT/lib/stage_tracker.sh"
 # shellcheck source=lib/config.sh
 . "$ONIONWARDEN_ROOT/lib/config.sh"
 # shellcheck source=lib/profile.sh
@@ -254,15 +256,25 @@ if ! command -v timeout >/dev/null 2>&1; then
     "bounded" "unbounded"
 fi
 
+# Top-level watchdog stage: the per-check collect/analyze loop. Each check is
+# a nested sub-stage so the operator sees "[onionwarden] N/M run checks,
+# i/T check <name> : <status>" — the hierarchical convention (lib/stage_tracker.sh).
+TOTAL_CHECKS=$(ls "$ONIONWARDEN_ROOT"/lib/checks/*.sh 2>/dev/null | wc -l | tr -d ' ')
+[ -n "$TOTAL_CHECKS" ] || TOTAL_CHECKS=0
+stage_begin 1 1 "run checks ($CADENCE)"
 CHECKS_RAN=0
+CHECK_IDX=0
 for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
   [ "$REFUSE_RUN" = "yes" ] && break
   [ -f "$cf" ] || continue
   name=$(basename "$cf" .sh)
+  CHECK_IDX=$(( CHECK_IDX + 1 ))
+  stage_begin "$CHECK_IDX" "$TOTAL_CHECKS" "check $name"
   cad=$(bash "$cf" cadence 2>/dev/null || printf 'unknown')
   [ "$cad" = "boot" ] && cad="slow"
   # Snapshot mode analyses every check regardless of cadence.
   if [ "$SNAPSHOT_MODE" != "yes" ] && [ "$cad" != "$CADENCE" ]; then
+    stage_skip "cadence $cad != $CADENCE"
     continue
   fi
 
@@ -270,6 +282,7 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     DISABLED_COUNT=$(( DISABLED_COUNT + 1 ))
     printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"disabled"}\n' \
       "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+    stage_skip "disabled in host.conf"
     continue
   fi
   CHECKS_RAN=$(( CHECKS_RAN + 1 ))
@@ -283,6 +296,7 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     else
       printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"not_in_snapshot"}\n' \
         "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+      stage_skip "not in snapshot"
       continue
     fi
   # Replay seam: ONIONWARDEN_FAKE_STATE_DIR supplies pre-captured current state,
@@ -296,12 +310,14 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     dispatch_synth "check_${name}" WARN "check '$name' collect failed or timed out" "ran" "failed"
     printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"collect_failed"}\n' \
       "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+    stage_fail "collect failed or timed out"
     continue
   fi
 
   if [ "$ANALYZE" != "yes" ]; then
     printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"collected_only"}\n' \
       "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
+    stage_skip "untrusted state — collected only"
     continue
   fi
 
@@ -311,10 +327,18 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     base=$(baseline_state_file "$BASELINE_USE" "$name")
     [ -n "$base" ] || base="/dev/null"
   fi
-  run_sandboxed bash "$cf" analyze --baseline "$base" --current "$cur" \
-    >> "$FINDINGS" 2>/dev/null || \
+  if run_sandboxed bash "$cf" analyze --baseline "$base" --current "$cur" \
+    >> "$FINDINGS" 2>/dev/null; then
+    stage_ok
+  else
     dispatch_synth "check_${name}" WARN "check '$name' analyze failed or timed out" "ran" "failed"
+    stage_fail "analyze failed or timed out"
+  fi
 done
+# Close the top-level "run checks" stage (if the loop broke on REFUSE_RUN with a
+# check stage still open, close that first so the stack unwinds cleanly).
+[ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_skip "run refused"
+stage_ok
 
 # --- process findings -----------------------------------------------------
 sev_of() { printf '%s' "$1" | sed -n 's/.*"severity":"\([A-Z]*\)".*/\1/p'; }
@@ -425,5 +449,6 @@ fi
 # Replay any events buffered during a prior receiver outage.
 events_flush_buffer || true
 
+stage_summary
 log_info "onionwarden-run $CADENCE complete: severity=$RUN_MAX_SEV findings=$FINDING_COUNT trust=$TRUST"
 exit 0
