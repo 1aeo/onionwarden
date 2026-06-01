@@ -43,8 +43,13 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
 - **No real-host deployment.** This was a build-and-local-test task. `install.sh`,
   `apply-ssh-hardening.sh`, and `onionwarden-baseline` are all *capable* of
   deploying but were never run against a real host. The canary rollout
-  (`relay-a`) is therefore not executed — `examples/answers-canary.example`
-  is rollout-ready.
+  (`relay-a`) is therefore not *executed* — but it is now fully *playbooked*:
+  `docs/PHASE4_CANARY_PLAYBOOK.md` is the step-by-step runbook (dry-run →
+  install → baseline+sign → dead-man self-test → 7-day watch window → signoff
+  gate → rollback) and `bin/onionwarden-canary-status` reports the canary's
+  PASS/HOLD verdict against the gate (≥7 clean days, zero unexplained WARN/CRIT,
+  not stale). `examples/answers-canary.example` is rollout-ready. Executing it
+  on a real host is the remaining operator step.
 - **`onionwarden-fleet-diff`** — a documented Phase-3 stub (`bin/onionwarden-fleet-diff`
   exits 64 with an explanation). Cross-fleet diff is explicitly Phase 3.
 - **Receiver cross-host correlation** (§4 M6) — Phase 3, not built.
