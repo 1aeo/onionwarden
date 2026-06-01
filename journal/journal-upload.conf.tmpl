@@ -1,0 +1,14 @@
+# /etc/systemd/journal-upload.conf.d/10-onionwarden.conf — onionwarden (L6).
+# RENDERED by scripts/journal-ship-setup.sh: @URL@ and @CERT_DIR@ are substituted;
+# in --http (insecure) mode the three *File= lines (all referencing @CERT_DIR@)
+# are stripped. Do not edit the rendered copy by hand — re-run the setup script.
+[Upload]
+URL=@URL@
+# Mutual TLS: the relay authenticates the receiver (TrustedCertificateFile) AND
+# presents its own client cert, so a stolen relay identity can be revoked at the
+# receiver and journals never cross the network in cleartext. Provision these
+# three files out-of-band (operator step — see journal/README.md), the same way
+# the fleet signing key is provisioned.
+ServerKeyFile=@CERT_DIR@/upload.key
+ServerCertificateFile=@CERT_DIR@/upload.crt
+TrustedCertificateFile=@CERT_DIR@/ca.crt
