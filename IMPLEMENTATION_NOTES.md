@@ -29,6 +29,19 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   command, host_id sanitisation, rate limiting) + `receiver/onionwarden-receiver`
   (self-hash/pubkey known-good comparison, sequence-gap detection, fleet-rollup
   digest).
+- **Receiver cross-host correlation** (`receiver/bin/onionwarden-correlate`,
+  Phase 3, §4 M6) — receiver-side aggregator that reads every host's events.log
+  and flags coordinated fleet activity a per-host view cannot see: **fan-out**
+  (same finding on ≥N hosts in a window — worm / supply-chain / kernel-CVE),
+  **ip-spray** (same source IP in auth findings across ≥N hosts), and
+  **blackout** (≥N hosts going silent with last-seen times clustered). The
+  load-bearing false-positive guard is DISTINCT-host counting — a single host,
+  or one host repeating a finding, never clusters. Correlation keys off the
+  receiver-stamped `recv_ts` (not host-forgeable). Tunable `--min-hosts` /
+  `--window-min` / `--since-min` / `--stale-min`, `--coarse` for recall.
+  Deployed by `receiver-setup.sh` into `.bin/` and scheduled `*/10` (see
+  RECEIVER.md). Exit 2 on any cluster; ntfy push per cluster. Tested by
+  `tests/test_correlate.py`.
 - **Kill-switch** — `lib/fatal.sh` + `onionwarden-fatal`: ships disarmed, signed
   master veto + armed-state file + in-scope `fatal_candidate` finding all
   required; off-box-first; cooldown; 7-item first-arm checklist; dry-run.
@@ -47,7 +60,6 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   is rollout-ready.
 - **`onionwarden-fleet-diff`** — a documented Phase-3 stub (`bin/onionwarden-fleet-diff`
   exits 64 with an explanation). Cross-fleet diff is explicitly Phase 3.
-- **Receiver cross-host correlation** (§4 M6) — Phase 3, not built.
 - **Off-box journal shipping** (`systemd-journal-upload`, L6) — Phase 3.
 - **`apt install debsums aide auditd`** — package installs are real-host
   operations. The checks detect-and-skip when these tools are absent

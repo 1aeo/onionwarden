@@ -56,7 +56,7 @@ Execution checklist — work top-to-bottom; check items off as they ship. Each i
 - [ ] `apt install auditd`; deploy the curated audit rules (§6)
 - [ ] Off-box journal shipping via `systemd-journal-upload` — closes the log-vacuum gap (§6, L6)
 - [ ] Build `onionwarden fleet-diff` — the operator-side role-grouped baseline report (§6)
-- [ ] Build receiver cross-host correlation — worm spread, IP spraying, simultaneous dead-man (§4, M6)
+- [x] Build receiver cross-host correlation — worm spread, IP spraying, simultaneous dead-man (§4, M6)
 
 ### Phase 4 — Active hardening
 - [ ] GRUB password, security sysctls, evaluate `lockdown=integrity`, host firewall (§6)
