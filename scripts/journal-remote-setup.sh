@@ -97,6 +97,10 @@ if [ "$HTTP" != 1 ] && [ "$DRY" != 1 ]; then
 fi
 
 if [ "$ENABLE" = 1 ]; then
+  if [ -n "$ROOT" ]; then
+    say "ERROR: --enable is incompatible with --root (would affect real system)"
+    exit 1
+  fi
   if command -v systemctl >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
     systemctl daemon-reload
     systemctl enable --now systemd-journal-remote.socket
