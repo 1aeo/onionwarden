@@ -91,6 +91,20 @@ def test_one_host_repeating_does_not_inflate_count(tmp_path):
     assert r.returncode == 0  # only 1 distinct host -> no cluster
 
 
+def test_fanout_counts_later_repeat_inside_window(tmp_path):
+    """An earlier repeat by one host must not mask a later fleet-wide fan-out."""
+    _ev(tmp_path, "relay-a", seq=1, recv_ts="2026-05-29T00:00:00Z")
+    _ev(tmp_path, "relay-a", seq=2, recv_ts="2026-05-29T10:00:00Z")
+    _ev(tmp_path, "relay-b", recv_ts="2026-05-29T10:05:00Z")
+    _ev(tmp_path, "relay-c", recv_ts="2026-05-29T10:10:00Z")
+    doc = _json(tmp_path, "2026-05-29T10:30:00Z")
+    fan = [c for c in doc["clusters"] if c["kind"] == "fan-out"]
+    assert len(fan) == 1
+    assert fan[0]["host_count"] == 3
+    assert set(fan[0]["hosts"]) == {"relay-a", "relay-b", "relay-c"}
+    assert fan[0]["spread_min"] == 10.0
+
+
 def test_distinct_observed_does_not_cluster_by_default(tmp_path):
     """Different module names on different hosts are NOT a fan-out by default —
     the key includes `observed`. (Coarse mode relaxes this; see below.)"""
@@ -153,6 +167,24 @@ def test_ip_spray_same_source_across_hosts(tmp_path):
     assert len(spray) == 1
     assert "203.0.113.7" in spray[0]["key"]
     assert spray[0]["host_count"] == 3
+
+
+def test_ip_spray_counts_later_repeat_inside_window(tmp_path):
+    """A prior hit from the same IP on one host must not hide a later spray."""
+    _ev(tmp_path, "relay-a", seq=1, sev="WARN", check="auth_log",
+        signal="new-src", observed="203.0.113.7 failed-auth burst",
+        recv_ts="2026-05-29T00:00:00Z")
+    _ev(tmp_path, "relay-a", seq=2, sev="WARN", check="auth_log",
+        signal="new-src", observed="203.0.113.7 failed-auth burst",
+        recv_ts="2026-05-29T11:00:00Z")
+    for h, t in (("relay-b", "11:02:00"), ("relay-c", "11:09:00")):
+        _ev(tmp_path, h, sev="WARN", check="auth_log", signal="new-src",
+            observed="203.0.113.7 failed-auth burst", recv_ts="2026-05-29T%sZ" % t)
+    doc = _json(tmp_path, "2026-05-29T11:30:00Z")
+    spray = [c for c in doc["clusters"] if c["kind"] == "ip-spray"]
+    assert len(spray) == 1
+    assert spray[0]["host_count"] == 3
+    assert spray[0]["spread_min"] == 9.0
 
 
 def test_ip_spray_ignores_bind_all_address(tmp_path):
