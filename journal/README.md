@@ -44,8 +44,11 @@ upload.key/crt  # per-monitored-host client cert -> that host's --cert-dir
 remote.key/crt  # the receiver's server cert      -> receiver's --cert-dir
 ```
 
-Default `--cert-dir` is `/etc/onionwarden/journal` on both ends. Keep the `.key`
-files mode 0600, owned by the service user.
+Default `--cert-dir` is `/etc/onionwarden/journal` on both ends. Keep private
+`.key` files mode 0600. On monitored hosts, `upload.key` can stay owned by
+root: the setup drop-in uses systemd `LoadCredential=` so the stock
+`systemd-journal-upload` dynamic user reads a private runtime copy. On the
+receiver, make `remote.key` readable by `systemd-journal-remote`.
 
 > Lab / pre-prod only: `--http` skips all of this and ships in cleartext with no
 > peer auth. Never use it on a real relay.

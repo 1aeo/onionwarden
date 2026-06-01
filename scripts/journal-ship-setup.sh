@@ -63,9 +63,20 @@ fi
 
 # render TEMPLATE -> stdout (substitute placeholders; strip cert lines for --http).
 render() {
-  local t=$1
+  local t=$1 base
+  base=$(basename "$t")
   if [ "$HTTP" = 1 ]; then
-    grep -vE '^(ServerKeyFile|ServerCertificateFile|TrustedCertificateFile)=' "$t"
+    case "$base" in
+      journal-upload.conf.tmpl)
+        grep -vE '^(ServerKeyFile|ServerCertificateFile|TrustedCertificateFile)=' "$t"
+        ;;
+      upload.service.d.conf)
+        sed '/^# BEGIN_MTLS_CREDENTIALS$/,/^# END_MTLS_CREDENTIALS$/d' "$t"
+        ;;
+      *)
+        cat "$t"
+        ;;
+    esac
   else
     cat "$t"
   fi | sed -e "s|@URL@|$RECEIVER_URL|g" \
