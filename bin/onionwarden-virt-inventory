@@ -40,7 +40,40 @@ while [ "$#" -gt 0 ]; do
     --fixture-dir)
       [ "$#" -ge 2 ] || { printf 'onionwarden-virt-inventory: --fixture-dir requires a value\n' >&2; exit 1; }
       FIXDIR=$2; shift 2 ;;
-    -h|--help)     sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)
+      cat <<'HELP'
+bin/onionwarden-virt-inventory — per-host virtualization inventory
+(OPERATOR_DECISIONS §6, ⚠ HIGH-RISK). Emits ONE JSON object describing whether
+a host is bare-metal / a VM / a container, plus the DMI + cgroup/namespace
+state that decision rests on.
+
+Why: §6 inventoried `relay-b` ONLY. The VM-vs-bare-metal status of every relay
+drives (a) the Phase-0 offline trust-establishment method — disk-snapshot scan
+for a VM vs. IPMI / live-USB for bare metal — and (b) whether `chattr +i`
+works (FS-dependent). Without it the offline scan cannot be planned.
+
+SELF-CONTAINED on purpose: it sources nothing from lib/, so the canonical way
+to run it across the fleet is to STREAM it over SSH — nothing is installed on
+the target:
+
+    ssh <host> 'bash -s' < bin/onionwarden-virt-inventory > inv/<host>.json
+
+Read-only: it only runs detection commands and reads /sys + /proc. Degrades
+gracefully when a probe needs root (dmidecode) or is absent — the missing
+probe is listed under "degraded", never fatal. Captures NO serial numbers or
+UUIDs (no PII) — only vendor / product / BIOS-version strings.
+
+Usage:
+  onionwarden-virt-inventory [--host NAME] [--fixture-dir DIR]
+Options:
+  --host NAME        host_id label (default: `hostname`)
+  --fixture-dir DIR  read each probe from a file in DIR instead of running it
+                     live (test/replay mode; see the file names in probe()).
+
+Streamed via `bash -s`, BASH_SOURCE[0] is unbound under `set -u`, so we run
+without -u (same reason onionwarden-snapshot's bundle does).
+HELP
+      exit 0 ;;
     *) printf 'onionwarden-virt-inventory: unknown argument: %s\n' "$1" >&2; exit 1 ;;
   esac
 done
