@@ -29,7 +29,7 @@ RECEIVER_URL="" RECEIVER_HOST="" PORT="19532"
 CERT_DIR="/etc/onionwarden/journal"
 HTTP=0 ROOT="" PRINT=0 ENABLE=0 DRY=0
 
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
