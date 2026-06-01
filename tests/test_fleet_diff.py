@@ -251,3 +251,61 @@ def test_pubkey_rejects_tampered_state(tmp_path, keypair):
     r = _run(fleet, "--pubkey", pub, "--indicators", "modules")
     assert r.returncode == 3  # strict: an unverifiable baseline is an error
     assert "relay-b" in r.stderr
+
+
+def test_pubkey_ignores_unsigned_role_file_that_would_hide_divergence(tmp_path, keypair):
+    priv, pub = keypair
+    fleet = tmp_path / "fleet"; fleet.mkdir()
+    _signed_host(fleet, "relay-a", {"modules": ["module ext4 -"]}, priv)
+    hd = _signed_host(fleet, "relay-b",
+                      {"modules": ["module ext4 -", "module rogue -"]}, priv)
+    # This file is outside the signed baseline. In verified mode it must not be
+    # able to move relay-b into a singleton role and suppress the rogue module.
+    (hd / "role").write_text("singleton\n")
+
+    r = _run(fleet, "--pubkey", pub, "--indicators", "modules",
+             "--fail-on-divergence", "--format", "json")
+    assert r.returncode == 4, r.stderr
+    doc = json.loads(r.stdout)
+    role = next(r for r in doc["roles"] if r["role"] == "unknown")
+    assert [d["line"] for d in role["indicators"]["modules"]["divergences"]] \
+        == ["module rogue -"]
+
+
+def test_pubkey_reads_verified_copy_not_mutated_original(tmp_path, keypair):
+    priv, pub = keypair
+    fleet = tmp_path / "fleet"; fleet.mkdir()
+    _signed_host(fleet, "relay-a", {"modules": ["module ext4 -"]}, priv)
+    hd = _signed_host(fleet, "relay-b",
+                      {"modules": ["module ext4 -", "module rogue -"]}, priv)
+
+    fakebin = tmp_path / "fakebin"; fakebin.mkdir()
+    wrapper = fakebin / "sha256sum"
+    wrapper.write_text("""#!/usr/bin/env python3
+import hashlib
+import os
+import pathlib
+import sys
+
+for name in sys.argv[1:]:
+    data = pathlib.Path(name).read_bytes()
+    print(f"{hashlib.sha256(data).hexdigest()}  {name}")
+    parts = pathlib.Path(name).parts
+    if "relay-b" in parts and name.endswith("/state/modules.state"):
+        pathlib.Path(os.environ["OW_MUTATE_AFTER_HASH"]).write_text("module ext4 -\\n")
+""")
+    wrapper.chmod(0o755)
+
+    env_path = f"{fakebin}{os.pathsep}{os.environ.get('PATH', '')}"
+    cmd = [BASH, str(FLEET_DIFF), "--fleet-dir", str(fleet), "--pubkey", pub,
+           "--indicators", "modules", "--fail-on-divergence", "--format", "json"]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
+                            "PATH": env_path,
+                            "OW_MUTATE_AFTER_HASH": str(hd / "state" / "modules.state")})
+    assert r.returncode == 4, r.stderr
+    doc = json.loads(r.stdout)
+    role = doc["roles"][0]
+    assert [d["line"] for d in role["indicators"]["modules"]["divergences"]] \
+        == ["module rogue -"]
+    assert (hd / "state" / "modules.state").read_text() == "module ext4 -\n"
