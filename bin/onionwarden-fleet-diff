@@ -38,7 +38,7 @@ ONIONWARDEN_ROOT=$(cd "$_bin_dir/.." && pwd); export ONIONWARDEN_ROOT
 # shellcheck source=lib/baseline.sh
 . "$ONIONWARDEN_ROOT/lib/baseline.sh"
 
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Default indicator set (PLAN §6: kernel taint, modules, listeners, SUID, sshd).
 # These are check names whose state file lives at state/<name>.state. Friendly
@@ -144,7 +144,7 @@ role_of() {
 
 # --- validate every host's baseline (and optionally verify signature) --------
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-fleetdiff.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" ${pulled:+"$pulled"}' EXIT
 
 missing=""
 for host in $hosts; do
