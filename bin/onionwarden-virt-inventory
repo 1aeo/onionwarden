@@ -34,8 +34,12 @@ set -o pipefail
 HOST="" FIXDIR=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --host)        HOST=$2; shift 2 ;;
-    --fixture-dir) FIXDIR=$2; shift 2 ;;
+    --host)
+      [ "$#" -ge 2 ] || { printf 'onionwarden-virt-inventory: --host requires a value\n' >&2; exit 1; }
+      HOST=$2; shift 2 ;;
+    --fixture-dir)
+      [ "$#" -ge 2 ] || { printf 'onionwarden-virt-inventory: --fixture-dir requires a value\n' >&2; exit 1; }
+      FIXDIR=$2; shift 2 ;;
     -h|--help)     sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'onionwarden-virt-inventory: unknown argument: %s\n' "$1" >&2; exit 1 ;;
   esac
@@ -69,7 +73,9 @@ have_fixture() { [ -n "$FIXDIR" ] && [ -f "$FIXDIR/$1" ]; }
 detect_virt() {  # $1 = ""|--container|--vm ; fixture file name $2
   if have_fixture "$2"; then fixture "$2"; return 0; fi
   if command -v systemd-detect-virt >/dev/null 2>&1; then
-    systemd-detect-virt $1 2>/dev/null || printf 'none'
+    local output
+    output=$(systemd-detect-virt $1 2>/dev/null) || output="none"
+    printf '%s' "$output"
   else
     printf 'unknown'
   fi
@@ -109,10 +115,16 @@ DMI_MANUF=$(dmi_manufacturer)
 cgroup_version() {
   if have_fixture cgroup_version; then fixture cgroup_version; return 0; fi
   # v2: /sys/fs/cgroup/cgroup.controllers exists. v1: /sys/fs/cgroup/* per ctrl.
-  if [ -f /sys/fs/cgroup/cgroup.controllers ]; then printf 'v2'
+  # Hybrid: both v2 and v1 indicators present.
+  if [ -f /sys/fs/cgroup/cgroup.controllers ] && { [ -d /sys/fs/cgroup/memory ] || [ -d /sys/fs/cgroup/pids ]; }; then
+    printf 'hybrid'
+  elif [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+    printf 'v2'
   elif [ -d /sys/fs/cgroup/memory ] || [ -d /sys/fs/cgroup/pids ]; then
-    [ -f /sys/fs/cgroup/cgroup.controllers ] && printf 'hybrid' || printf 'v1'
-  else printf 'unknown'; fi
+    printf 'v1'
+  else
+    printf 'unknown'
+  fi
 }
 CG_VERSION=$(cgroup_version)
 pid1_cgroup() {
