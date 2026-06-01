@@ -212,7 +212,8 @@ def _windowed_clusters(buckets, min_hosts, window_s):
                 break
         if not hit:
             continue
-        out.append((key, sev, list(per_host.keys()), first_t, last_t, sample))
+        hosts = [h for h, t in per_host.items() if first_t <= t <= last_t]
+        out.append((key, sev, hosts, first_t, last_t, sample))
     return out
 
 
