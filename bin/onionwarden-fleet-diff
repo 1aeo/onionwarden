@@ -120,25 +120,68 @@ hosts=$(printf '%s\n' $hosts | sort -u | tr '\n' ' ')
 host_count=$(printf '%s\n' $hosts | grep -c . || true)
 
 # --- role lookup -------------------------------------------------------------
-# Precedence: --roles-map line `host role` > per-host `role` file > host.conf
-# `role = "..."` > "unknown".
+# Precedence:
+#   - --roles-map line `host role` (operator-supplied local policy)
+#   - with --pubkey: signed host.conf only; unsigned receiver metadata is ignored
+#   - without --pubkey: per-host `role` file > host.conf `role = "..."`
+#   - "unknown"
+role_from_host_conf() {
+  local hc=$1
+  grep -E '^[[:space:]]*role' "$hc" 2>/dev/null | head -n1 \
+    | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' || true
+}
+
+host_conf_for() {
+  local host=$1 hc
+  for hc in "$fleet_dir/$host/host.conf" "$fleet_dir/$host/baseline/host.conf"; do
+    if [ -f "$hc" ]; then printf '%s' "$hc"; return 0; fi
+  done
+  return 1
+}
+
 role_of() {
-  local host=$1 r=""
+  local host=$1 r="" cache=""
+  if [ -n "${WORK:-}" ]; then
+    cache="$WORK/$host.role"
+    if [ -f "$cache" ]; then
+      tr -d '\n\r' < "$cache"
+      return 0
+    fi
+  fi
   if [ -n "$roles_map" ] && [ -f "$roles_map" ]; then
     r=$(awk -v h="$host" '$1==h{print $2; exit}' "$roles_map" 2>/dev/null || true)
+  fi
+  if [ -z "$r" ] && [ -n "$pubkey" ]; then
+    # In verified mode, do not let unsigned receiver-side role files decide
+    # grouping: a tampered role can hide a compromised host in a singleton role.
+    local hc hccopy
+    hc=$(host_conf_for "$host" || true)
+    if [ -n "$hc" ]; then
+      hccopy="$WORK/$host.host.conf"
+      if cp "$hc" "$hccopy" 2>/dev/null && cp "$hc.sig" "$hccopy.sig" 2>/dev/null \
+         && onionwarden_verify_artifact "$pubkey" "$hccopy" >/dev/null 2>&1; then
+        r=$(role_from_host_conf "$hccopy")
+      else
+        log_warn "ignoring unsigned/unverified host.conf for host '$host' while --pubkey is active"
+      fi
+    fi
+    [ -n "$r" ] || r="unknown"
+    [ -n "$cache" ] && printf '%s' "$r" > "$cache"
+    printf '%s' "$r"
+    return 0
   fi
   if [ -z "$r" ] && [ -f "$fleet_dir/$host/role" ]; then
     r=$(tr -d ' \n\r\t' < "$fleet_dir/$host/role" 2>/dev/null || true)
   fi
   if [ -z "$r" ]; then
-    local hc="$fleet_dir/$host/host.conf"
-    [ -f "$hc" ] || hc="$fleet_dir/$host/baseline/host.conf"
+    local hc
+    hc=$(host_conf_for "$host" || true)
     if [ -f "$hc" ]; then
-      r=$(grep -E '^[[:space:]]*role' "$hc" 2>/dev/null | head -n1 \
-        | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' || true)
+      r=$(role_from_host_conf "$hc")
     fi
   fi
   [ -n "$r" ] || r="unknown"
+  [ -n "$cache" ] && printf '%s' "$r" > "$cache"
   printf '%s' "$r"
 }
 
@@ -148,10 +191,23 @@ trap 'rm -rf "$WORK"' EXIT
 
 missing=""
 for host in $hosts; do
-  sd=$(resolve_state_dir "$fleet_dir/$host" || true)
-  if [ -z "$sd" ]; then
+  sd_src=$(resolve_state_dir "$fleet_dir/$host" || true)
+  if [ -z "$sd_src" ]; then
     missing="$missing $host"
     continue
+  fi
+  sd="$sd_src"
+  if [ -n "$pubkey" ]; then
+    # Verify and later read a private copy so mutable receiver storage cannot be
+    # swapped after signature verification but before membership_table reads it.
+    mkdir -p "$WORK/baselines"
+    sd="$WORK/baselines/$host"
+    rm -rf "$sd"
+    if ! mkdir -p "$sd" 2>/dev/null || ! cp -R "$sd_src/." "$sd/" 2>/dev/null; then
+      log_err "failed to copy baseline for host '$host' from $sd_src"
+      missing="$missing $host"
+      continue
+    fi
   fi
   printf '%s' "$sd" > "$WORK/$host.statedir"
   if [ -n "$pubkey" ]; then
