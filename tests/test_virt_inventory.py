@@ -108,7 +108,7 @@ def test_unknown_when_nothing_detectable(tmp_path):
         "dmi_sys_vendor": "", "dmi_product_name": "",
         "dmi_bios_version": "", "dmi_system_manufacturer": "",
     })
-    d = _json("mystery", fix)
+    d = _json("mystery", fix, env={"ONIONWARDEN_DMI_DIR": str(tmp_path / "nope")})
     assert d["verdict"] == "unknown"
 
 
