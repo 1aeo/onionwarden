@@ -25,6 +25,9 @@ host's config, so changing it is a config edit, not code.
 
 ## §3 — Off-box receiver host  ⚠ HIGH-RISK
 **Default:** **deferred — `offbox_log_target` ships as a placeholder.**
+**Decision space:** see [`docs/decisions/2026-05-29-receiver-host.md`](docs/decisions/2026-05-29-receiver-host.md)
+— requirements, candidate hosts, trade-offs, and a recommendation. **Decision
+still needed** (this record does not pick the host).
 **Rationale:** the receiver must be a real, always-on, **off-fleet** host; it
 cannot be guessed. The build provides `receiver/` (append handler, verifier,
 digest, seqcheck, setup) ready to drop onto whatever host the operator picks.
