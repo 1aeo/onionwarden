@@ -24,7 +24,7 @@ CERT_DIR="/etc/onionwarden/journal"
 JOURNAL_DIR="/var/log/journal/remote"
 HTTP=0 ROOT="" PRINT=0 ENABLE=0 DRY=0
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
