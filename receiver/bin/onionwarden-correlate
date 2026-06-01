@@ -174,45 +174,49 @@ class Cluster(object):
 
 def _windowed_clusters(buckets, min_hosts, window_s):
     """buckets: key -> list of (host, epoch, severity, sample). Emit one cluster
-    per key where >= min_hosts DISTINCT hosts have an event AND some window of
-    `window_s` contains the first occurrence from >= min_hosts distinct hosts.
+    per key where some window of `window_s` contains events from >= min_hosts
+    DISTINCT hosts.
 
-    A host is counted once (by its EARLIEST occurrence). We then slide over the
-    sorted earliest-per-host times and require min_hosts to fall inside window_s.
+    A host may repeat a finding before and during an incident. Count it once per
+    candidate window, but do not pin it to its earliest occurrence across the
+    whole lookback or a stale repeat can hide the later coordinated cluster.
     """
     out = []
     for key, items in buckets.items():
-        # earliest occurrence per host
-        per_host = {}
-        sev = "WARN"
-        sample = key
+        events = []
         for host, t, severity, smp in items:
             if t is None:
                 continue
-            if host not in per_host or t < per_host[host]:
-                per_host[host] = t
-            if severity == "CRIT":
-                sev = "CRIT"
-            sample = smp
-        times = sorted(per_host.values())
-        if len(per_host) < min_hosts:
+            events.append((t, host, severity, smp))
+        events.sort()
+        if len({host for _t, host, _severity, _smp in events}) < min_hosts:
             continue
-        # sliding window: is there a run of >= min_hosts within window_s?
-        hit = False
-        first_t = last_t = None
-        i = 0
-        n = len(times)
-        for i in range(n):
-            j = i
-            while j < n and times[j] - times[i] <= window_s:
-                j += 1
-            if (j - i) >= min_hosts:
-                hit = True
-                first_t, last_t = times[i], times[j - 1]
+
+        # Sliding window over all occurrences, with distinct-host counts inside
+        # the current window so repeated lines from one host cannot inflate it.
+        host_counts = {}
+        left = 0
+        for right, (t, host, _severity, _smp) in enumerate(events):
+            host_counts[host] = host_counts.get(host, 0) + 1
+            while t - events[left][0] > window_s:
+                old_host = events[left][1]
+                host_counts[old_host] -= 1
+                if host_counts[old_host] == 0:
+                    del host_counts[old_host]
+                left += 1
+
+            if len(host_counts) >= min_hosts:
+                window_events = events[left:right + 1]
+                sev = ("CRIT" if any(severity == "CRIT"
+                                      for _t, _h, severity, _smp in window_events)
+                       else "WARN")
+                sample = window_events[-1][3]
+                first_t, last_t = events[left][0], t
+                hosts = list(host_counts.keys())
                 break
-        if not hit:
+        else:
             continue
-        out.append((key, sev, list(per_host.keys()), first_t, last_t, sample))
+        out.append((key, sev, hosts, first_t, last_t, sample))
     return out
 
 
