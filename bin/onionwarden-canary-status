@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""onionwarden-canary-status — report a canary host's rollout health (Phase 4).
+
+Phase 4 deploys onionwarden to ONE canary relay with `alert_push_level=warn`
+(push everything to learn the noise floor) and holds there until the canary has
+run clean. This tool turns "has the canary been quiet?" into a single PASS/HOLD
+verdict against the signoff gate in docs/PHASE4_CANARY_PLAYBOOK.md:
+
+    PASS  when  observed_days >= --require-days  (default 7)
+          AND   zero UNEXPLAINED WARN/CRIT findings in the window
+          AND   the canary is not stale (still reporting)
+
+It reads the canary's append-only events.log (the receiver's copy is the
+authoritative one — it's cross-checked and the host cannot rewrite it). An
+"unexplained" alert is any WARN/CRIT finding NOT matched by the operator's
+--ack-file; that file is how the operator records "I looked at this WARN and it's
+a known-benign noise-floor item," which is exactly the Phase-4 learning loop.
+
+Event source (one of):
+  --events FILE              path to the canary's events.log
+  --receiver-root DIR --host H   resolves to DIR/H/events.log
+  (else: $ONIONWARDEN_RECEIVER_ROOT + --host)
+
+Options:
+  --require-days N    days of clean observation required to PASS (default 7)
+  --stale-min M       no event for M minutes => canary is dark (default 30)
+  --ack-file FILE     one acknowledgement pattern per line (see below)
+  --since-days D      only consider events newer than D days (default: all)
+  --now-epoch E       pin "now" (UTC epoch) for deterministic runs/tests
+  --format text|json
+
+ack-file lines (blank lines and #-comments ignored) match a finding if the line
+is a substring of the finding's "signal", "check", "summary", or "observed", or
+equals its run_id or seq. e.g.:
+    clock/unsynced          # NTP not yet settled on first boot — benign
+    run_id=2026-05-29T...    # a specific reviewed run
+    snap                     # snap-revision churn during apt week
+
+Exit: 0 PASS, 1 HOLD (gate not yet met), 2 usage error.
+"""
+import calendar
+import json
+import os
+import sys
+import time
+
+
+def _parse_ts(s):
+    if not s:
+        return None
+    try:
+        return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _now(args):
+    if args.get("now_epoch") is not None:
+        return float(args["now_epoch"])
+    return time.time()
+
+
+def read_events(path):
+    if not os.path.isfile(path):
+        return
+    with open(path, "r", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = _parse_ts(ev.get("recv_ts")) or _parse_ts(ev.get("ts"))
+            yield ev, t
+
+
+def load_acks(path):
+    pats = []
+    if not path:
+        return pats
+    with open(path, "r", errors="replace") as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                pats.append(line)
+    return pats
+
+
+def is_acked(ev, pats):
+    detail = ev.get("detail") or {}
+    hay = [str(ev.get("run_id", "")), "run_id=%s" % ev.get("run_id", ""),
+           "seq=%s" % ev.get("seq", ""), str(detail.get("signal", "")),
+           str(detail.get("check", "")), str(ev.get("summary", "")),
+           str(detail.get("observed", "")),
+           "%s/%s" % (detail.get("check", ""), detail.get("signal", ""))]
+    hay = " \n".join(hay)
+    for p in pats:
+        if p in hay:
+            return True
+    return False
+
+
+def canary_status(events_path, args):
+    now = _now(args)
+    since_cut = None
+    if args.get("since_days") is not None:
+        since_cut = now - args["since_days"] * 86400
+    acks = load_acks(args.get("ack_file"))
+
+    crit = warn = info = 0
+    unexplained = []
+    earliest = latest = None
+    last_any = None
+    host_id = args.get("host") or "?"
+
+    for ev, t in read_events(events_path):
+        if t is not None and (last_any is None or t > last_any):
+            last_any = t
+        if since_cut is not None and t is not None and t < since_cut:
+            continue
+        if ev.get("host_id"):
+            host_id = ev["host_id"]
+        if t is not None:
+            earliest = t if earliest is None else min(earliest, t)
+            latest = t if latest is None else max(latest, t)
+        if ev.get("kind") != "finding":
+            continue
+        sev = ev.get("severity", "")
+        if sev == "CRIT":
+            crit += 1
+        elif sev == "WARN":
+            warn += 1
+        elif sev == "INFO":
+            info += 1
+        if sev in ("WARN", "CRIT") and not is_acked(ev, acks):
+            detail = ev.get("detail") or {}
+            unexplained.append({
+                "seq": ev.get("seq"), "severity": sev,
+                "ts": ev.get("recv_ts") or ev.get("ts"),
+                "signal": "%s/%s" % (detail.get("check", "?"),
+                                     detail.get("signal", "?")),
+                "summary": ev.get("summary", "")})
+
+    observed_days = 0.0
+    if earliest is not None:
+        observed_days = (now - earliest) / 86400.0
+    stale_min = None
+    if last_any is not None:
+        stale_min = (now - last_any) / 60.0
+    is_stale = (last_any is None) or (stale_min > args["stale_min"])
+
+    reasons = []
+    if observed_days < args["require_days"]:
+        reasons.append("only %.1f of %d required clean days observed"
+                       % (observed_days, args["require_days"]))
+    if unexplained:
+        reasons.append("%d unexplained WARN/CRIT finding(s)" % len(unexplained))
+    if is_stale:
+        if last_any is None:
+            reasons.append("no events from the canary yet")
+        else:
+            reasons.append("canary is STALE — last event %.0f min ago (> %d)"
+                           % (stale_min, args["stale_min"]))
+
+    verdict = "PASS" if not reasons else "HOLD"
+
+    result = {
+        "canary": host_id, "verdict": verdict,
+        "observed_days": round(observed_days, 2),
+        "require_days": args["require_days"],
+        "counts": {"CRIT": crit, "WARN": warn, "INFO": info},
+        "unexplained_count": len(unexplained),
+        "unexplained": unexplained,
+        "stale": is_stale,
+        "minutes_since_last_event": (round(stale_min, 1)
+                                     if stale_min is not None else None),
+        "reasons": reasons,
+        "acks_loaded": len(acks),
+    }
+
+    if args["format"] == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print("=== onionwarden canary status: %s ===" % host_id)
+        print("verdict:        %s" % verdict)
+        print("observed:       %.1f / %d clean days required"
+              % (observed_days, args["require_days"]))
+        print("findings:       %d CRIT  %d WARN  %d INFO  (window)"
+              % (crit, warn, info))
+        print("unexplained:    %d  (acked patterns loaded: %d)"
+              % (len(unexplained), len(acks)))
+        if last_any is not None:
+            print("last event:     %.0f min ago%s"
+                  % (stale_min, "  <-- STALE" if is_stale else ""))
+        else:
+            print("last event:     (none)")
+        if unexplained:
+            print("--- unexplained WARN/CRIT (review or add to --ack-file) ---")
+            for u in unexplained[:25]:
+                print("  %-4s seq=%-5s %-28s %s"
+                      % (u["severity"], u["seq"], u["signal"], u["summary"]))
+            if len(unexplained) > 25:
+                print("  ... and %d more" % (len(unexplained) - 25))
+        if verdict == "PASS":
+            print("GATE: PASS — canary is clean. Proceed to operator signoff, "
+                  "then expand to the next host (PHASE4_CANARY_PLAYBOOK.md §gate).")
+        else:
+            print("GATE: HOLD — " + "; ".join(reasons))
+
+    return 0 if verdict == "PASS" else 1
+
+
+def main(argv):
+    args = {"require_days": 7, "stale_min": 30, "format": "text",
+            "ack_file": None, "since_days": None, "now_epoch": None,
+            "host": None, "events": None, "receiver_root": None}
+    a = argv[1:]
+    i = 0
+    while i < len(a):
+        try:
+            if a[i] == "--events":
+                args["events"] = a[i + 1]; i += 2
+            elif a[i] == "--receiver-root":
+                args["receiver_root"] = a[i + 1]; i += 2
+            elif a[i] == "--host":
+                args["host"] = a[i + 1]; i += 2
+            elif a[i] == "--require-days":
+                args["require_days"] = int(a[i + 1]); i += 2
+            elif a[i] == "--stale-min":
+                args["stale_min"] = int(a[i + 1]); i += 2
+            elif a[i] == "--ack-file":
+                args["ack_file"] = a[i + 1]; i += 2
+            elif a[i] == "--since-days":
+                args["since_days"] = float(a[i + 1]); i += 2
+            elif a[i] == "--now-epoch":
+                args["now_epoch"] = float(a[i + 1]); i += 2
+            elif a[i] == "--format":
+                args["format"] = a[i + 1]; i += 2
+            elif a[i] in ("-h", "--help"):
+                sys.stdout.write(__doc__); return 0
+            else:
+                sys.stderr.write("canary-status: unknown argument %r\n" % a[i])
+                return 2
+        except (IndexError, ValueError):
+            sys.stderr.write("canary-status: bad value for %s\n" % a[i]); return 2
+
+    if args["format"] not in ("text", "json"):
+        sys.stderr.write("canary-status: --format must be text|json\n"); return 2
+
+    events_path = args["events"]
+    if not events_path:
+        root = args["receiver_root"] or os.environ.get("ONIONWARDEN_RECEIVER_ROOT")
+        if not root or not args["host"]:
+            sys.stderr.write("canary-status: need --events FILE, or "
+                             "--receiver-root DIR --host H (or "
+                             "$ONIONWARDEN_RECEIVER_ROOT + --host)\n")
+            return 2
+        events_path = os.path.join(root, args["host"], "events.log")
+
+    return canary_status(events_path, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
