@@ -102,6 +102,24 @@ def test_hold_when_crit_even_if_acked_warn(tmp_path):
     assert doc["unexplained_count"] == 1
 
 
+def test_hold_when_broad_ack_matches_crit(tmp_path):
+    ev = tmp_path / "relay-a" / "events.log"
+    _events(ev, [
+        (1, "2026-05-20T10:00:00Z", "selfreport", "INFO", "", "", "boot"),
+        (2, "2026-05-22T10:00:00Z", "finding", "WARN", "snap",
+         "snap_packages", "snap core revision changed"),
+        (3, "2026-05-25T10:00:00Z", "finding", "CRIT", "snap",
+         "snap_suid", "new SUID binary inside /snap"),
+        (4, "2026-05-28T10:00:00Z", "selfreport", "INFO", "", "", "alive"),
+    ])
+    ack = tmp_path / "acks"; ack.write_text("snap\n")
+    doc, rc = _json(ev, "2026-05-28T10:05:00Z", "--ack-file", str(ack))
+    assert rc == 1 and doc["verdict"] == "HOLD"
+    assert doc["counts"]["CRIT"] == 1
+    assert doc["unexplained_count"] == 1
+    assert doc["unexplained"][0]["severity"] == "CRIT"
+
+
 def test_hold_when_stale(tmp_path):
     ev = tmp_path / "relay-a" / "events.log"
     _clean8(ev)
@@ -165,6 +183,15 @@ def test_missing_source_is_usage_error(tmp_path):
                        env={k: v for k, v in os.environ.items()
                             if k != "ONIONWARDEN_RECEIVER_ROOT"})
     assert r.returncode == 2
+
+
+def test_missing_ack_file_is_usage_error(tmp_path):
+    ev = tmp_path / "relay-a" / "events.log"
+    _clean8(ev)
+    r = _run(ev, "2026-05-28T11:10:00Z",
+             "--ack-file", str(tmp_path / "missing.acks"))
+    assert r.returncode == 2
+    assert "not found" in r.stderr
 
 
 def test_dispatched_via_onionwarden_cli(tmp_path):
