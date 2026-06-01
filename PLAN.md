@@ -54,7 +54,7 @@ Execution checklist — work top-to-bottom; check items off as they ship. Each i
 
 ### Phase 3 — Real-time layer + cross-fleet
 - [ ] `apt install auditd`; deploy the curated audit rules (§6)
-- [ ] Off-box journal shipping via `systemd-journal-upload` — closes the log-vacuum gap (§6, L6)
+- [x] Off-box journal shipping via `systemd-journal-upload` — closes the log-vacuum gap (§6, L6)
 - [x] Build `onionwarden fleet-diff` — the operator-side role-grouped baseline report (§6)
 - [x] Build receiver cross-host correlation — worm spread, IP spraying, simultaneous dead-man (§4, M6)
 
