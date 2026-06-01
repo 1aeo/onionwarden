@@ -36,7 +36,9 @@ BINDIR="$ROOT/.bin"
 mkdir -p "$ROOT" "$BINDIR"
 cp -p "$SRC_DIR/receiver-append.sh" "$BINDIR/receiver-append.sh"
 cp -p "$SRC_DIR/onionwarden-receiver" "$BINDIR/onionwarden-receiver"
-chmod 0755 "$BINDIR/receiver-append.sh" "$BINDIR/onionwarden-receiver"
+cp -p "$SRC_DIR/bin/onionwarden-correlate" "$BINDIR/onionwarden-correlate"
+chmod 0755 "$BINDIR/receiver-append.sh" "$BINDIR/onionwarden-receiver" \
+  "$BINDIR/onionwarden-correlate"
 
 chattr_ok=1
 apply_appendonly() {
@@ -70,6 +72,7 @@ cat <<EOF
 receiver-setup: tree ready under $ROOT
 Append handler: $BINDIR/receiver-append.sh
 Verifier:       $BINDIR/onionwarden-receiver  (verify-record|verify-check|seqcheck|digest)
+Correlator:     $BINDIR/onionwarden-correlate (cross-host fan-out|ip-spray|blackout, M6)
 
 Add ONE line per monitored host to the receiver account's ~/.ssh/authorized_keys,
 pinning the forced command so a host can only APPEND to ITS OWN events.log,
@@ -83,6 +86,7 @@ JSON host_id is different is rewritten to "<host>" and logged.
 Then schedule on the receiver (cron):
   */5 * * * *  $BINDIR/onionwarden-receiver verify-check
   */5 * * * *  $BINDIR/onionwarden-receiver seqcheck
+  */10 * * * * $BINDIR/onionwarden-correlate --quiet
   0 7 * * *    $BINDIR/onionwarden-receiver digest
 Capture the known-good ONCE, from trusted hosts:
   $BINDIR/onionwarden-receiver verify-record
