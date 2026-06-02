@@ -52,6 +52,7 @@ Exit: 2 if any cluster is found, 0 if none, 1 on usage error.
 """
 import calendar
 import json
+import ipaddress
 import os
 import re
 import sys
@@ -126,6 +127,13 @@ def _ips_in(*strings):
         if not s:
             continue
         for m in _IP_RE.findall(s):
+            # The regex is deliberately loose; validate each token as a real IP
+            # so time-like ("10:00:00") or out-of-range ("999.999.999.999")
+            # strings can't seed false ip-spray correlation clusters.
+            try:
+                ipaddress.ip_address(m)
+            except ValueError:
+                continue
             # skip obvious version-y dotted strings (e.g. 0.0.0.0 is a bind-all,
             # not a peer) — keep it simple: drop the unspecified address.
             if m in ("0.0.0.0", "::"):

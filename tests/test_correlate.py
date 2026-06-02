@@ -165,6 +165,40 @@ def test_ip_spray_ignores_bind_all_address(tmp_path):
     assert not any(c["kind"] == "ip-spray" for c in doc["clusters"])
 
 
+def test_ip_spray_cluster_excludes_out_of_window_host(tmp_path):
+    """A host logging the same source IP far outside the correlation window
+    must NOT be counted in the cluster (regression for windowed membership —
+    the cluster host list is scoped to the detected window, not every host
+    that ever saw the key)."""
+    for h, t in (("relay-a", "11:00:00"), ("relay-b", "11:02:00"),
+                 ("relay-c", "11:09:00")):
+        _ev(tmp_path, h, sev="WARN", check="auth_log", signal="new-src",
+            observed="203.0.113.7 failed-auth burst",
+            recv_ts="2026-05-29T%sZ" % t)
+    # relay-d saw the same IP two hours earlier — inside --since-min (1440) but
+    # well outside the 60-minute correlation window.
+    _ev(tmp_path, "relay-d", sev="WARN", check="auth_log", signal="new-src",
+        observed="203.0.113.7 failed-auth burst",
+        recv_ts="2026-05-29T09:00:00Z")
+    doc = _json(tmp_path, "2026-05-29T11:30:00Z")
+    spray = [c for c in doc["clusters"] if c["kind"] == "ip-spray"]
+    assert len(spray) == 1
+    assert spray[0]["host_count"] == 3
+    assert "relay-d" not in spray[0]["hosts"]
+
+
+def test_ip_spray_ignores_time_like_and_out_of_range_tokens(tmp_path):
+    """Time-of-day ('10:00:00') and out-of-range ('999.999.999.999') tokens
+    are not valid IPs and must not seed an ip-spray cluster."""
+    for h, t in (("relay-a", "11:00:00"), ("relay-b", "11:02:00"),
+                 ("relay-c", "11:05:00")):
+        _ev(tmp_path, h, sev="WARN", check="auth_log", signal="new-src",
+            observed="event at 10:00:00 from 999.999.999.999",
+            recv_ts="2026-05-29T%sZ" % t)
+    doc = _json(tmp_path, "2026-05-29T11:30:00Z")
+    assert not any(c["kind"] == "ip-spray" for c in doc["clusters"])
+
+
 # --- blackout --------------------------------------------------------------
 
 def test_blackout_simultaneous_silence(tmp_path):
