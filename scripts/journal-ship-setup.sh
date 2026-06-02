@@ -61,6 +61,30 @@ if [ "$HTTP" = 1 ]; then
   case "$RECEIVER_URL" in https://*) say "WARNING: --http set but URL is https://"; ;; esac
 fi
 
+# Validate every value that gets interpolated into a drop-in via sed. The
+# negated character classes reject newlines, control chars, the sed delimiter
+# `|`, `&`, backslashes and whitespace, so an attacker-influenced value cannot
+# break out of the `s|...|...|` replacement and inject extra config directives
+# (e.g. a second `URL=` line) into the trusted root-owned drop-in.
+case "$RECEIVER_URL" in
+  http://*|https://*) ;;
+  *) say "ERROR: --receiver-url must be http(s)://host[:port]: $RECEIVER_URL"; exit 1 ;;
+esac
+case "$RECEIVER_URL" in
+  *[!A-Za-z0-9._:/%+~=?@#-]*)
+    say "ERROR: --receiver-url contains invalid characters"; exit 1 ;;
+esac
+if [ "$HTTP" != 1 ]; then
+  case "$RECEIVER_URL" in
+    https://*) ;;
+    *) say "ERROR: --receiver-url must be https:// unless --http is given"; exit 1 ;;
+  esac
+fi
+case "$CERT_DIR" in
+  *[!A-Za-z0-9._/-]*) say "ERROR: --cert-dir contains invalid characters: $CERT_DIR"; exit 1 ;;
+esac
+case "$PORT" in ''|*[!0-9]*) say "ERROR: --port must be numeric: $PORT"; exit 1 ;; esac
+
 # render TEMPLATE -> stdout (substitute placeholders; strip cert lines for --http).
 render() {
   local t=$1

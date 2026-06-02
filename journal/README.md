@@ -6,7 +6,7 @@ attacker can run `journalctl --vacuum-time=1s` for a clean, verify-passing wipe.
 Streaming each host's journal off-box makes that wipe detectable — the receiver
 already holds the copy.
 
-```
+```text
  monitored host                                   off-box receiver
  ┌───────────────────────────┐                    ┌──────────────────────────────┐
  │ systemd-journald           │                    │ systemd-journal-remote.socket │
@@ -38,7 +38,7 @@ streams only from real fleet hosts. Both ends use mutual TLS. Provision a small
 internal CA out-of-band (the same offline/trusted machine that holds the fleet
 signing key is a fine home for it):
 
-```
+```text
 ca.crt          # the fleet journal CA (public)  -> every host + receiver
 upload.key/crt  # per-monitored-host client cert -> that host's --cert-dir
 remote.key/crt  # the receiver's server cert      -> receiver's --cert-dir
@@ -79,6 +79,19 @@ sudo ./scripts/journal-ship-setup.sh \
 Renders the persistent-journald drop-in, the `journal-upload.conf.d` drop-in
 (URL + mTLS), and a hardening drop-in for `systemd-journal-upload.service`, then
 enables the uploader. Idempotent.
+
+> **Forward-secure sealing (FSS).** The journald drop-in sets `Seal=yes`, but
+> that only takes effect once the sealing keys exist. Generate them once per
+> host after the drop-in is in place (and store/transcribe the displayed
+> verification key off-box):
+>
+> ```sh
+> sudo journalctl --setup-keys
+> ```
+>
+> Without this, `Seal=yes` is a no-op. FSS makes on-box tampering detectable
+> between the last upload and a wipe; it complements — does not replace — the
+> off-box copy.
 
 ## Verify
 
