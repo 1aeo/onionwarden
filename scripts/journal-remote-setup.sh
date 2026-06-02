@@ -98,6 +98,14 @@ emit "$TMPL/remote.socket.d.conf.tmpl"  "$SOCKET_D"
 # case.
 if [ "$JOURNAL_DIR" != "$DEFAULT_JOURNAL_DIR" ] || [ "$HTTP" = 1 ]; then
   emit "$TMPL/remote.service.d.conf.tmpl" "$SERVICE_D"
+else
+  # Remove stale override when switching back to defaults (mTLS + default journal
+  # dir) to prevent the service from silently accepting HTTP or using the wrong
+  # --output path after an operator re-runs without --http or --journal-dir.
+  if [ -f "$SERVICE_D" ] && [ "$DRY" != 1 ] && [ "$PRINT" != 1 ]; then
+    rm -f "$SERVICE_D"
+    say "removed $SERVICE_D (now using defaults)"
+  fi
 fi
 
 if [ "$PRINT" = 1 ]; then exit 0; fi
