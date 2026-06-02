@@ -95,17 +95,18 @@ posture:
 
 1. **Local validator**: `unbound` listening on `127.0.0.1:53` with
    `tls-upstream: yes` and `do-tcp: yes`.
-2. **DoT upstreams** (port 853, TLS-pinned hostnames): pick two from diverse
-   providers (e.g. `1.1.1.1@853#cloudflare-dns.com` +
+2. **DoT upstreams** (port 853, TLS-pinned hostnames): pick two or more from
+   diverse providers (e.g. `1.1.1.1@853#cloudflare-dns.com` +
    `9.9.9.9@853#dns.quad9.net` + `8.8.8.8@853#dns.google`).
 3. **DNSSEC**: trust anchor pinned at `/var/lib/unbound/root.key`
    (auto-bootstrapped via `unbound-anchor` then ownership-fixed to
    `unbound:unbound`).
 4. **`/etc/resolv.conf` is a real file** pointing only to `127.0.0.1` — not a
-   symlink to `systemd-resolved`, which has known memory-leak behavior under
-   high parallel DNS load.
-5. **`systemd-resolved` masked and killed** (`systemctl mask systemd-resolved
-   && pkill -f systemd-resolve`).
+   symlink to `systemd-resolved`, which we observed leaking memory under
+   sustained high parallel DNS load.
+5. **`systemd-resolved` stopped and masked** (`systemctl stop systemd-resolved
+   && systemctl mask systemd-resolved`). Prefer this deterministic
+   stop-then-mask over a broad `pkill -f`, which can match unrelated processes.
 6. **No fallback to plain Do53** — confirm via `unbound-control list_forwards`
    showing only `853` ports.
 
@@ -148,7 +149,14 @@ operator does not have to opt in to get them:
 
 ## Reporting a vulnerability
 
-Report security issues privately to **security@example.com**. Please include:
+Report security issues privately through either channel:
+
+- **GitHub private vulnerability reporting** — open the repository's **Security**
+  tab and choose **Report a vulnerability**. This is the preferred channel: it
+  is always available on the repo and keeps the report private until disclosure.
+- **Email** — **security@example.com**.
+
+Please include:
 
 - the affected component (file/path) and version (`VERSION`),
 - a description of the issue and its impact under the threat model above,
@@ -156,6 +164,3 @@ Report security issues privately to **security@example.com**. Please include:
 
 Do not open a public issue for an unfixed vulnerability. We aim to acknowledge
 reports promptly and will coordinate disclosure timing with the reporter.
-
-> The `security@example.com` address is a placeholder until a dedicated security
-> contact is published; update this section when one is established.
