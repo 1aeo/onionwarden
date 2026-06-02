@@ -192,19 +192,16 @@ def _windowed_clusters(buckets, min_hosts, window_s):
     """
     out = []
     for key, items in buckets.items():
-        # earliest occurrence per host
+        # earliest occurrence per host, tracking (time, severity) for each
         per_host = {}
-        sev = "WARN"
         sample = key
         for host, t, severity, smp in items:
             if t is None:
                 continue
-            if host not in per_host or t < per_host[host]:
-                per_host[host] = t
-            if severity == "CRIT":
-                sev = "CRIT"
+            if host not in per_host or t < per_host[host][0]:
+                per_host[host] = (t, severity)
             sample = smp
-        times = sorted(per_host.values())
+        times = sorted([t for t, _sev in per_host.values()])
         if len(per_host) < min_hosts:
             continue
         # sliding window: is there a run of >= min_hosts within window_s?
@@ -222,7 +219,14 @@ def _windowed_clusters(buckets, min_hosts, window_s):
                 break
         if not hit:
             continue
-        hosts = [h for h, t in per_host.items() if first_t <= t <= last_t]
+        # Filter hosts to the window and compute severity from ONLY those hosts
+        hosts = []
+        sev = "WARN"
+        for h, (t, severity) in per_host.items():
+            if first_t <= t <= last_t:
+                hosts.append(h)
+                if severity == "CRIT":
+                    sev = "CRIT"
         out.append((key, sev, hosts, first_t, last_t, sample))
     return out
 
