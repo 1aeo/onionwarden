@@ -96,7 +96,7 @@ emit "$TMPL/remote.socket.d.conf.tmpl"  "$SOCKET_D"
 # writing to its compiled-in default. Pin it with an ExecStart override only
 # when the path is non-default, leaving the stock unit untouched in the common
 # case.
-if [ "$JOURNAL_DIR" != "$DEFAULT_JOURNAL_DIR" ]; then
+if [ "$JOURNAL_DIR" != "$DEFAULT_JOURNAL_DIR" ] || [ "$HTTP" = 1 ]; then
   emit "$TMPL/remote.service.d.conf.tmpl" "$SERVICE_D"
 fi
 
