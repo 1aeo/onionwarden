@@ -88,7 +88,7 @@ indicator_state_name() {
 resolve_state_dir() {
   local hd=$1
   if [ -d "$hd/state" ] && [ ! -L "$hd/state" ]; then printf '%s' "$hd"; return 0; fi
-  if [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
+  if [ ! -L "$hd/baseline" ] && [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
   return 1
 }
 
@@ -194,7 +194,7 @@ ind_canon=""
 for i in $indicators; do
   ind_canon="$ind_canon $(indicator_state_name "$i")"
 done
-indicators=$(printf '%s\n' $ind_canon | tr '\n' ' ')
+indicators=$(printf '%s\n' $ind_canon | sort -u | tr '\n' ' ')
 
 # --- build the per-(role,indicator) membership tables ------------------------
 # roles present, sorted, unique.
