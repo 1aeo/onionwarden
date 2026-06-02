@@ -87,8 +87,8 @@ indicator_state_name() {
 # (<host>/baseline/state/). Prints the resolved dir, or nothing if none.
 resolve_state_dir() {
   local hd=$1
-  if [ -d "$hd/state" ]; then printf '%s' "$hd"; return 0; fi
-  if [ -d "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
+  if [ -d "$hd/state" ] && [ ! -L "$hd/state" ]; then printf '%s' "$hd"; return 0; fi
+  if [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
   return 1
 }
 
