@@ -66,6 +66,7 @@ cron Python scripts), a public hostname, or any inbound service beyond sshd
 ## Candidates
 
 ### A. Off-fleet VPS at a *different* provider (e.g. a small cloud instance away from the relays' provider)
+
 - **Pros:** clean provider/AS diversity (R5); cheapest path to always-on (R2);
   trivially off-fleet (R1); easy OOB via provider console (S2); disposable +
   reproducible (S4).
@@ -77,6 +78,7 @@ cron Python scripts), a public hostname, or any inbound service beyond sshd
   signing key is never here, which bounds the damage).
 
 ### B. A dedicated existing 1aeo host that is **not** a monitored relay
+
 - **Pros:** already under your control, no new provider, no new bill; you know
   its posture.
 - **Cons:** **must verify it is genuinely off-fleet** — not in the same provider
@@ -87,6 +89,7 @@ cron Python scripts), a public hostname, or any inbound service beyond sshd
   relays whose only job can become "be the receiver."
 
 ### C. Bring up a **new, dedicated** box solely as the receiver (VPS or small bare-metal at a diverse location)
+
 - **Pros:** purpose-built → smallest attack surface (R4); you control the full
   posture; can be the long-lived boring anchor (S4); pick a provider/location for
   max diversity (R5).
@@ -96,6 +99,7 @@ cron Python scripts), a public hostname, or any inbound service beyond sshd
   this is the textbook trust-anchor posture.
 
 ### D. Home / on-prem box (off-net, behind your own connection)
+
 - **Pros:** no third-party provider in the trust path at all; full physical
   control; effectively free.
 - **Cons:** residential uptime/IP churn threatens R2; inbound SSH to home is its
