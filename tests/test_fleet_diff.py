@@ -28,7 +28,7 @@ def _host(fleet, name, role="tor-relay", states=None, *, make_state=True):
         sd.mkdir(parents=True, exist_ok=True)
         for check, lines in (states or {}).items():
             (sd / f"{check}.state").write_text(
-                "".join(l + "\n" for l in lines))
+                "".join(line + "\n" for line in lines))
     return hd
 
 
@@ -47,7 +47,8 @@ def _json(fleet, *args):
 # --- empty fleet -----------------------------------------------------------
 
 def test_empty_fleet_succeeds(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     r = _run(fleet)
     assert r.returncode == 0
     assert "No hosts found" in r.stdout
@@ -57,7 +58,8 @@ def test_empty_fleet_succeeds(tmp_path):
 
 def test_empty_fleet_reserved_dirs_ignored(tmp_path):
     """A live receiver tree has dotfiles and _-reserved dirs; they are not hosts."""
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     (fleet / "_unknown").mkdir()
     (fleet / ".git").mkdir()
     doc, _ = _json(fleet)
@@ -67,7 +69,8 @@ def test_empty_fleet_reserved_dirs_ignored(tmp_path):
 # --- single-host fleet -----------------------------------------------------
 
 def test_single_host_inventory_only(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _host(fleet, "solo", states={"modules": ["module ext4 -", "module tcp_bbr -"]})
     r = _run(fleet, "--indicators", "modules")
     assert r.returncode == 0
@@ -101,7 +104,8 @@ def _diverged_fleet(fleet):
 
 
 def test_diverged_fleet_flags_minority_module(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _diverged_fleet(fleet)
     doc, rc = _json(fleet)
     assert rc == 0
@@ -116,7 +120,8 @@ def test_diverged_fleet_flags_minority_module(tmp_path):
 
 
 def test_diverged_fleet_flags_rogue_listener(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _diverged_fleet(fleet)
     doc, _ = _json(fleet)
     role = next(r for r in doc["roles"] if r["role"] == "tor-relay")
@@ -125,7 +130,8 @@ def test_diverged_fleet_flags_rogue_listener(tmp_path):
 
 
 def test_identical_hosts_have_no_divergence(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     for h in ("relay-a", "relay-b"):
         _host(fleet, h, states={"ssh": ["sshd permitrootlogin no"]})
     doc, _ = _json(fleet, "--indicators", "ssh")
@@ -135,7 +141,8 @@ def test_identical_hosts_have_no_divergence(tmp_path):
 def test_roles_are_compared_independently(tmp_path):
     """An eval-host listening on a port no relay has is NOT a relay divergence —
     role grouping is the whole point (a relay and an eval-host SHOULD differ)."""
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _host(fleet, "relay-a", role="tor-relay",
           states={"ports": ["listen tcp 0.0.0.0:9001"]})
     _host(fleet, "relay-b", role="tor-relay",
@@ -148,7 +155,8 @@ def test_roles_are_compared_independently(tmp_path):
 
 
 def test_fail_on_divergence_exit_code(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _diverged_fleet(fleet)
     r = _run(fleet, "--fail-on-divergence")
     assert r.returncode == 4
@@ -157,7 +165,8 @@ def test_fail_on_divergence_exit_code(tmp_path):
 
 
 def test_roles_map_overrides_role_file(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _host(fleet, "h1", role="generic", states={"ssh": ["sshd x 1"]})
     _host(fleet, "h2", role="generic", states={"ssh": ["sshd x 2"]})
     rmap = tmp_path / "roles.map"
@@ -170,7 +179,8 @@ def test_roles_map_overrides_role_file(tmp_path):
 # --- missing-baseline error path -------------------------------------------
 
 def test_missing_baseline_is_strict_error(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _host(fleet, "good", states={"modules": ["module ext4 -"]})
     (fleet / "bad").mkdir()  # host dir with no state/ baseline at all
     r = _run(fleet)
@@ -179,7 +189,8 @@ def test_missing_baseline_is_strict_error(tmp_path):
 
 
 def test_missing_baseline_no_strict_excludes_host(tmp_path):
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _host(fleet, "good", states={"modules": ["module ext4 -"]})
     (fleet / "bad").mkdir()
     doc, rc = _json(fleet, "--no-strict", "--indicators", "modules")
@@ -190,7 +201,8 @@ def test_missing_baseline_no_strict_excludes_host(tmp_path):
 def test_receiver_layout_baseline_subdir(tmp_path):
     """Receiver stores baselines at <host>/baseline/state/ — fleet-diff must
     transparently resolve that nesting (RECEIVER.md / PLAN §5)."""
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     hd = fleet / "relay-a"
     (hd / "baseline" / "state").mkdir(parents=True)
     (hd / "role").write_text("tor-relay\n")
@@ -225,7 +237,8 @@ def _signed_host(fleet, name, states, priv):
 
 def test_pubkey_verified_fleet_diffs_clean(tmp_path, keypair):
     priv, pub = keypair
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _signed_host(fleet, "relay-a", {"modules": ["module ext4 -"]}, priv)
     _signed_host(fleet, "relay-b",
                  {"modules": ["module ext4 -", "module rogue -"]}, priv)
@@ -243,7 +256,8 @@ def test_pubkey_verified_fleet_diffs_clean(tmp_path, keypair):
 
 def test_pubkey_rejects_tampered_state(tmp_path, keypair):
     priv, pub = keypair
-    fleet = tmp_path / "fleet"; fleet.mkdir()
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
     _signed_host(fleet, "relay-a", {"modules": ["module ext4 -"]}, priv)
     hd = _signed_host(fleet, "relay-b", {"modules": ["module ext4 -"]}, priv)
     # tamper a state file AFTER signing — manifest hash no longer matches
@@ -251,3 +265,43 @@ def test_pubkey_rejects_tampered_state(tmp_path, keypair):
     r = _run(fleet, "--pubkey", pub, "--indicators", "modules")
     assert r.returncode == 3  # strict: an unverifiable baseline is an error
     assert "relay-b" in r.stderr
+
+
+def test_symlinked_state_file_is_not_followed(tmp_path):
+    """Security: a malicious fleet/receiver tree must not exfiltrate
+    operator-local files. A state file symlinked at an out-of-tree secret is
+    skipped, not read into the report."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("listen tcp 0.0.0.0:31337 SECRETLEAK\n")
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    _host(fleet, "relay-a", states={"ports": ["listen tcp 0.0.0.0:9001"]})
+    # relay-b: same role, but its ports.state is a symlink to the secret.
+    hb = _host(fleet, "relay-b", states={})
+    (hb / "state" / "ports.state").symlink_to(secret)
+    r = _run(fleet, "--indicators", "ports")
+    assert "SECRETLEAK" not in r.stdout
+    assert "SECRETLEAK" not in r.stderr
+    doc, _ = _json(fleet, "--indicators", "ports")
+    role = next(x for x in doc["roles"] if x["role"] == "tor-relay")
+    lines = [d["line"] for d in role["indicators"]["ports"]["divergences"]]
+    assert all("SECRETLEAK" not in ln for ln in lines)
+
+
+def test_symlinked_state_dir_is_not_followed(tmp_path):
+    """The 'state' parent dir being a symlink is likewise refused, so a tree
+    cannot redirect a whole host's state at an operator-local directory."""
+    secret_dir = tmp_path / "outside"
+    secret_dir.mkdir()
+    (secret_dir / "ports.state").write_text(
+        "listen tcp 0.0.0.0:31337 SECRETLEAK\n")
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    _host(fleet, "relay-a", states={"ports": ["listen tcp 0.0.0.0:9001"]})
+    hb = fleet / "relay-b"
+    hb.mkdir(parents=True)
+    (hb / "role").write_text("tor-relay\n")
+    (hb / "state").symlink_to(secret_dir, target_is_directory=True)
+    r = _run(fleet, "--indicators", "ports")
+    assert "SECRETLEAK" not in r.stdout
+    assert "SECRETLEAK" not in r.stderr

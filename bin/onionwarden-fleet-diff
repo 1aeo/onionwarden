@@ -98,7 +98,10 @@ if [ -n "$from_receiver" ]; then
   pulled=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-fleet.XXXXXX")
   # shellcheck disable=SC2086
   log_info "pulling fleet baselines from $from_receiver into $pulled"
-  if ! rsync -az ${ssh_opts:+-e "ssh$ssh_opts"} "$from_receiver"/ "$pulled"/; then
+  # --safe-links drops any symlink that points outside the pulled tree, so a
+  # malicious receiver tree cannot smuggle in e.g. `state/x.state ->
+  # /etc/hostname` and have the diff read operator-local files into the report.
+  if ! rsync -az --safe-links ${ssh_opts:+-e "ssh$ssh_opts"} "$from_receiver"/ "$pulled"/; then
     die "rsync from $from_receiver failed"
   fi
   fleet_dir="$pulled"
@@ -221,8 +224,14 @@ membership_table() {
   : > "$tmp"
   for host in $rhosts; do
     sd=$(cat "$WORK/$host.statedir")
+    # Refuse to follow symlinks: a malicious fleet/receiver tree could point a
+    # state file (or its 'state' parent dir) at an operator-local file (e.g.
+    # /etc/hostname) and exfiltrate its contents into the report. rsync's
+    # --safe-links drops out-of-tree symlinks on import; this is the
+    # defense-in-depth check that also covers the local --fleet-dir path.
+    [ -L "$sd/state" ] && continue
     sf="$sd/state/$ind.state"
-    [ -f "$sf" ] || continue
+    { [ -f "$sf" ] && [ ! -L "$sf" ]; } || continue
     # host<TAB>line ; skip blank lines.
     sort -u "$sf" | while IFS= read -r line; do
       [ -n "$line" ] || continue
