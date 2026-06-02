@@ -142,7 +142,7 @@ def canary_status(events_path, args):
             warn += 1
         elif sev == "INFO":
             info += 1
-        if sev in ("WARN", "CRIT") and not is_acked(ev, acks):
+        if sev == "CRIT" or (sev == "WARN" and not is_acked(ev, acks)):
             detail = ev.get("detail") or {}
             unexplained.append({
                 "seq": ev.get("seq"), "severity": sev,
