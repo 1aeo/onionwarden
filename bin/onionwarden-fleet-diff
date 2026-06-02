@@ -92,6 +92,10 @@ resolve_state_dir() {
   return 1
 }
 
+# --- set up temp directories and trap early to prevent leaks ------------------
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-fleetdiff.XXXXXX")
+trap 'rm -rf "$WORK" ${pulled:+"$pulled"}' EXIT
+
 # --- optionally pull the fleet tree from the receiver over SSH/rsync ---------
 if [ -n "$from_receiver" ]; then
   require_cmd rsync || die "--from-receiver needs rsync on this box"
@@ -146,8 +150,6 @@ role_of() {
 }
 
 # --- validate every host's baseline (and optionally verify signature) --------
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-fleetdiff.XXXXXX")
-trap 'rm -rf "$WORK" ${pulled:+"$pulled"}' EXIT
 
 missing=""
 for host in $hosts; do
