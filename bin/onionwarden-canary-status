@@ -120,7 +120,7 @@ def canary_status(events_path, args):
 
     crit = warn = info = 0
     unexplained = []
-    earliest = latest = None
+    earliest = None
     last_any = None
     host_id = args.get("host") or "?"
 
@@ -133,7 +133,6 @@ def canary_status(events_path, args):
             host_id = ev["host_id"]
         if t is not None:
             earliest = t if earliest is None else min(earliest, t)
-            latest = t if latest is None else max(latest, t)
         if ev.get("kind") != "finding":
             continue
         sev = ev.get("severity", "")
