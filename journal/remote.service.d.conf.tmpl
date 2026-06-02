@@ -1,0 +1,10 @@
+# /etc/systemd/system/systemd-journal-remote.service.d/10-onionwarden.conf
+# RENDERED by scripts/journal-remote-setup.sh ONLY when --journal-dir is set to
+# a non-default path. systemd-journal-remote takes its output directory from
+# --output on the command line, not from journal-remote.conf, so we override
+# ExecStart to point it at the requested store. The empty ExecStart= clears the
+# packaged default; -3 is the socket-activation fd handed over by the .socket
+# unit (SplitMode/Seal/cert settings still come from journal-remote.conf).
+[Service]
+ExecStart=
+ExecStart=/usr/lib/systemd/systemd-journal-remote --listen-@LISTEN@=-3 --output=@JOURNAL_DIR@/

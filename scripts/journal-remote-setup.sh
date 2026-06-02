@@ -43,7 +43,24 @@ done
 
 say() { printf 'journal-remote: %s\n' "$*" >&2; }
 case "$PORT" in ''|*[!0-9]*) say "bad --port: $PORT"; exit 1 ;; esac
+# Validate values interpolated into drop-ins via sed: the negated character
+# classes reject newlines, control chars, the sed delimiter `|`, `&`,
+# backslashes and whitespace, so an attacker-influenced value cannot break out
+# of the `s|...|...|` replacement and inject directives into a root-owned file.
+case "$CERT_DIR" in
+  *[!A-Za-z0-9._/-]*) say "ERROR: --cert-dir contains invalid characters: $CERT_DIR"; exit 1 ;;
+esac
+case "$JOURNAL_DIR" in
+  /*) ;;
+  *) say "ERROR: --journal-dir must be an absolute path: $JOURNAL_DIR"; exit 1 ;;
+esac
+case "$JOURNAL_DIR" in
+  *[!A-Za-z0-9._/-]*) say "ERROR: --journal-dir contains invalid characters: $JOURNAL_DIR"; exit 1 ;;
+esac
 [ "$HTTP" = 1 ] && say "WARNING: --http accepts journals with no peer auth — lab only"
+
+# Listen flag for the socket-activated ExecStart override (fd -3 from the unit).
+if [ "$HTTP" = 1 ]; then LISTEN_MODE="http"; else LISTEN_MODE="https"; fi
 
 render() {
   local t=$1
@@ -51,11 +68,14 @@ render() {
     grep -vE '^(ServerKeyFile|ServerCertificateFile|TrustedCertificateFile)=' "$t"
   else
     cat "$t"
-  fi | sed -e "s|@CERT_DIR@|$CERT_DIR|g" -e "s|@PORT@|$PORT|g"
+  fi | sed -e "s|@CERT_DIR@|$CERT_DIR|g" -e "s|@PORT@|$PORT|g" \
+           -e "s|@JOURNAL_DIR@|$JOURNAL_DIR|g" -e "s|@LISTEN@|$LISTEN_MODE|g"
 }
 
 REMOTE_D="$ROOT/etc/systemd/journal-remote.conf.d/10-onionwarden.conf"
 SOCKET_D="$ROOT/etc/systemd/system/systemd-journal-remote.socket.d/10-onionwarden.conf"
+SERVICE_D="$ROOT/etc/systemd/system/systemd-journal-remote.service.d/10-onionwarden.conf"
+DEFAULT_JOURNAL_DIR="/var/log/journal/remote"
 
 emit() {  # TEMPLATE DEST
   local content dir
@@ -70,6 +90,15 @@ emit() {  # TEMPLATE DEST
 
 emit "$TMPL/journal-remote.conf.tmpl"   "$REMOTE_D"
 emit "$TMPL/remote.socket.d.conf.tmpl"  "$SOCKET_D"
+# systemd-journal-remote only honours its output directory via --output on
+# ExecStart (journal-remote.conf has no Output= directive), so a custom
+# --journal-dir would otherwise be silently ignored while the service kept
+# writing to its compiled-in default. Pin it with an ExecStart override only
+# when the path is non-default, leaving the stock unit untouched in the common
+# case.
+if [ "$JOURNAL_DIR" != "$DEFAULT_JOURNAL_DIR" ]; then
+  emit "$TMPL/remote.service.d.conf.tmpl" "$SERVICE_D"
+fi
 
 if [ "$PRINT" = 1 ]; then exit 0; fi
 

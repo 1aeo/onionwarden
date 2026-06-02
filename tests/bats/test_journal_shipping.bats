@@ -88,9 +88,34 @@ fp() {  # fingerprint every file under $1 (path + content), order-stable
 @test "receiver socket drop-in clears the package default before setting the port" {
   run "$REMOTE" --port 23456 --print
   [ "$status" -eq 0 ]
-  # an empty ListenStream= must precede the real one (clears the vendor default)
-  printf '%s\n' "$output" | grep -A2 '\[Socket\]' | grep -qx 'ListenStream='
-  [[ "$output" == *"ListenStream=23456"* ]]
+  # The empty ListenStream= must appear strictly BEFORE the real one, otherwise
+  # the vendor default isn't actually cleared. Compare line numbers.
+  empty_ln=$(printf '%s\n' "$output" | grep -n '^ListenStream=$' | head -1 | cut -d: -f1)
+  val_ln=$(printf '%s\n' "$output" | grep -n '^ListenStream=23456$' | head -1 | cut -d: -f1)
+  [ -n "$empty_ln" ]
+  [ -n "$val_ln" ]
+  [ "$empty_ln" -lt "$val_ln" ]
+}
+
+@test "relay rejects newline-injected --receiver-url" {
+  run "$SHIP" --receiver-url "$(printf 'https://r.invalid:5555\nURL=http://attacker:19532')" --print
+  [ "$status" -ne 0 ]
+}
+
+@test "relay rejects a --cert-dir with shell/sed metacharacters" {
+  run "$SHIP" --receiver-host recv.example.net --cert-dir '/etc/x|evil' --print
+  [ "$status" -ne 0 ]
+}
+
+@test "receiver pins ExecStart --output only for a custom --journal-dir" {
+  run "$REMOTE" --port 19532 --journal-dir /srv/journals --print
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"systemd-journal-remote.service.d/10-onionwarden.conf"* ]]
+  [[ "$output" == *"--output=/srv/journals/"* ]]
+  # default path leaves the stock unit untouched (no service.d override)
+  run "$REMOTE" --port 19532 --print
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"systemd-journal-remote.service.d/10-onionwarden.conf"* ]]
 }
 
 @test "receiver --http strips cert lines" {
@@ -128,8 +153,10 @@ fp() {  # fingerprint every file under $1 (path + content), order-stable
 }
 
 @test "changing the port re-renders the listen drop-in (not appended)" {
-  "$REMOTE" --root "$ROOT" --port 19532 >/dev/null 2>&1
-  "$REMOTE" --root "$ROOT" --port 28000 >/dev/null 2>&1
+  run "$REMOTE" --root "$ROOT" --port 19532
+  [ "$status" -eq 0 ]
+  run "$REMOTE" --root "$ROOT" --port 28000
+  [ "$status" -eq 0 ]
   f="$ROOT/etc/systemd/system/systemd-journal-remote.socket.d/10-onionwarden.conf"
   run grep -c 'ListenStream=28000' "$f"
   [ "$output" -eq 1 ]
