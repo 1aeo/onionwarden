@@ -81,6 +81,10 @@ if [ "$HTTP" != 1 ]; then
   esac
 fi
 case "$CERT_DIR" in
+  /*) ;;
+  *) say "ERROR: --cert-dir must be an absolute path: $CERT_DIR"; exit 1 ;;
+esac
+case "$CERT_DIR" in
   *[!A-Za-z0-9._/-]*) say "ERROR: --cert-dir contains invalid characters: $CERT_DIR"; exit 1 ;;
 esac
 case "$PORT" in ''|*[!0-9]*) say "ERROR: --port must be numeric: $PORT"; exit 1 ;; esac

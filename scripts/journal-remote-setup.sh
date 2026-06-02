@@ -48,6 +48,10 @@ case "$PORT" in ''|*[!0-9]*) say "bad --port: $PORT"; exit 1 ;; esac
 # backslashes and whitespace, so an attacker-influenced value cannot break out
 # of the `s|...|...|` replacement and inject directives into a root-owned file.
 case "$CERT_DIR" in
+  /*) ;;
+  *) say "ERROR: --cert-dir must be an absolute path: $CERT_DIR"; exit 1 ;;
+esac
+case "$CERT_DIR" in
   *[!A-Za-z0-9._/-]*) say "ERROR: --cert-dir contains invalid characters: $CERT_DIR"; exit 1 ;;
 esac
 case "$JOURNAL_DIR" in
