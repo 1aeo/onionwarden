@@ -80,11 +80,20 @@ def load_acks(path):
     pats = []
     if not path:
         return pats
-    with open(path, "r", errors="replace") as fh:
-        for line in fh:
-            line = line.split("#", 1)[0].strip()
-            if line:
-                pats.append(line)
+    if not os.path.isfile(path):
+        sys.stderr.write(
+            "canary-status: --ack-file not found: %s\n" % path)
+        sys.exit(2)
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    pats.append(line)
+    except OSError as exc:
+        sys.stderr.write(
+            "canary-status: cannot read --ack-file %s: %s\n" % (path, exc))
+        sys.exit(2)
     return pats
 
 
