@@ -167,6 +167,17 @@ def test_missing_source_is_usage_error(tmp_path):
     assert r.returncode == 2
 
 
+def test_missing_ack_file_is_usage_error(tmp_path):
+    # An unreadable/missing --ack-file must be a clean usage error (exit 2),
+    # not an uncaught OSError traceback.
+    ev = tmp_path / "events.log"
+    _clean8(ev)
+    r = _run(ev, "2026-05-28T11:10:00Z", "--ack-file", str(tmp_path / "nope.acks"))
+    assert r.returncode == 2
+    assert "ack-file" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
 def test_dispatched_via_onionwarden_cli(tmp_path):
     ev = tmp_path / "relay-a" / "events.log"
     _clean8(ev)
