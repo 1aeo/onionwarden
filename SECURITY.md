@@ -105,7 +105,7 @@ posture:
    symlink to `systemd-resolved`, which has known memory-leak behavior under
    high parallel DNS load.
 5. **`systemd-resolved` masked and killed** (`systemctl mask systemd-resolved
-   && pkill -f systemd-resolve`).
+   && pkill -f systemd-resolved`).
 6. **No fallback to plain Do53** — confirm via `unbound-control list_forwards`
    showing only `853` ports.
 
