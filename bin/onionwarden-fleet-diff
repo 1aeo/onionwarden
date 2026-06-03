@@ -212,6 +212,10 @@ if [ -n "$missing" ]; then
   done
   hosts=$(printf '%s\n' $new | tr '\n' ' ')
   host_count=$(printf '%s\n' $hosts | grep -c . || true)
+  if [ "$host_count" -eq 0 ]; then
+    printf 'onionwarden-fleet-diff: all hosts have missing/unverified baselines — no usable hosts remain\n' >&2
+    exit 3
+  fi
 fi
 
 # Normalise the indicator list to canonical state-file names.
