@@ -90,13 +90,20 @@ fi
 
 if [ "$HTTP" != 1 ] && [ "$DRY" != 1 ]; then
   cd_real="$ROOT$CERT_DIR"
-  if [ ! -f "$cd_real/remote.key" ]; then
+  if [ ! -f "$cd_real/remote.key" ] || \
+     [ ! -f "$cd_real/remote.crt" ] || \
+     [ ! -f "$cd_real/ca.crt" ]; then
     say "NOTE: mTLS material not found in $CERT_DIR (remote.key/remote.crt/ca.crt)"
     say "      provision it out-of-band before enabling — see journal/README.md"
   fi
 fi
 
 if [ "$ENABLE" = 1 ]; then
+  if [ -n "$ROOT" ]; then
+    say "--enable cannot be combined with --root (would toggle the live host unit"
+    say "against on-host config, not the files rendered under $ROOT)"
+    exit 1
+  fi
   if command -v systemctl >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
     systemctl daemon-reload
     systemctl enable --now systemd-journal-remote.socket

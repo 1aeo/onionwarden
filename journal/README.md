@@ -6,7 +6,7 @@ attacker can run `journalctl --vacuum-time=1s` for a clean, verify-passing wipe.
 Streaming each host's journal off-box makes that wipe detectable — the receiver
 already holds the copy.
 
-```
+```text
  monitored host                                   off-box receiver
  ┌───────────────────────────┐                    ┌──────────────────────────────┐
  │ systemd-journald           │                    │ systemd-journal-remote.socket │
@@ -38,7 +38,7 @@ streams only from real fleet hosts. Both ends use mutual TLS. Provision a small
 internal CA out-of-band (the same offline/trusted machine that holds the fleet
 signing key is a fine home for it):
 
-```
+```text
 ca.crt          # the fleet journal CA (public)  -> every host + receiver
 upload.key/crt  # per-monitored-host client cert -> that host's --cert-dir
 remote.key/crt  # the receiver's server cert      -> receiver's --cert-dir

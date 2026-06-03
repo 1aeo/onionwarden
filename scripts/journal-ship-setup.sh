@@ -56,9 +56,19 @@ if [ -z "$RECEIVER_URL" ]; then
   if [ "$HTTP" = 1 ]; then RECEIVER_URL="http://$RECEIVER_HOST:$PORT"
   else RECEIVER_URL="https://$RECEIVER_HOST:$PORT"; fi
 fi
+# Keep the scheme and the --http escape hatch in lockstep: an http:// URL must
+# be an explicit opt-in, and --http must not be paired with an https:// URL
+# (which would leave the mTLS config blocks in place over a cleartext intent).
+case "$RECEIVER_URL" in
+  http://*)
+    [ "$HTTP" = 1 ] || { say "http:// receiver URLs require --http (cleartext, lab only)"; exit 1; }
+    ;;
+  https://*)
+    [ "$HTTP" = 0 ] || { say "--http cannot be combined with an https:// receiver URL"; exit 1; }
+    ;;
+esac
 if [ "$HTTP" = 1 ]; then
   say "WARNING: --http ships journals in CLEARTEXT with no peer auth — lab use only"
-  case "$RECEIVER_URL" in https://*) say "WARNING: --http set but URL is https://"; ;; esac
 fi
 
 # render TEMPLATE -> stdout (substitute placeholders; strip cert lines for --http).
@@ -111,13 +121,20 @@ if [ "$PRINT" = 1 ]; then exit 0; fi
 
 if [ "$HTTP" != 1 ] && [ "$DRY" != 1 ] && [ "$PRINT" != 1 ]; then
   cd_real="${ROOT}${CERT_DIR}"
-  if [ ! -f "$cd_real/upload.key" ]; then
+  if [ ! -f "$cd_real/upload.key" ] || \
+     [ ! -f "$cd_real/upload.crt" ] || \
+     [ ! -f "$cd_real/ca.crt" ]; then
     say "NOTE: mTLS material not found in $CERT_DIR (upload.key/upload.crt/ca.crt)"
     say "      provision it out-of-band before enabling — see journal/README.md"
   fi
 fi
 
 if [ "$ENABLE" = 1 ]; then
+  if [ -n "$ROOT" ]; then
+    say "--enable cannot be combined with --root (would restart live host units"
+    say "instead of using the files rendered under $ROOT)"
+    exit 1
+  fi
   if command -v systemctl >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
     systemctl daemon-reload
     systemctl restart systemd-journald
