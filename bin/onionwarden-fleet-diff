@@ -95,15 +95,16 @@ resolve_state_dir() {
   # before preferring it over baseline/state/. An empty state/ should not shadow
   # a populated baseline/state/.
   if [ -d "$hd/state" ] && [ ! -L "$hd/state" ]; then
-    # shellcheck disable=SC2012
-    if ls "$hd/state"/*.state >/dev/null 2>&1; then
+    # Require at least one *real regular* .state file: a symlinked or directory
+    # *.state entry is skipped later in membership_table(), so accepting it here
+    # would admit a broken host and report spurious divergences against it.
+    if find "$hd/state" -mindepth 1 -maxdepth 1 -type f -name '*.state' -print -quit 2>/dev/null | grep -q .; then
       printf '%s' "$hd"
       return 0
     fi
   fi
   if [ ! -L "$hd/baseline" ] && [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then
-    # shellcheck disable=SC2012
-    if ls "$hd/baseline/state"/*.state >/dev/null 2>&1; then
+    if find "$hd/baseline/state" -mindepth 1 -maxdepth 1 -type f -name '*.state' -print -quit 2>/dev/null | grep -q .; then
       printf '%s' "$hd/baseline"
       return 0
     fi
@@ -132,6 +133,16 @@ fi
 
 [ -d "$fleet_dir" ] || die "fleet-dir does not exist: $fleet_dir"
 
+# Fail fast on an unusable --roles-map rather than silently falling back to
+# per-host metadata: a missing/unreadable/symlinked map would otherwise change
+# the role inventory with no signal, hiding or inventing within-role divergences.
+if [ -n "$roles_map" ]; then
+  [ -e "$roles_map" ] || die "--roles-map does not exist: $roles_map"
+  [ ! -L "$roles_map" ] || die "--roles-map must not be a symlink: $roles_map"
+  [ -f "$roles_map" ] || die "--roles-map is not a regular file: $roles_map"
+  [ -r "$roles_map" ] || die "--roles-map is not readable: $roles_map"
+fi
+
 # --- discover hosts ----------------------------------------------------------
 # One subdirectory per host (skip dotfiles and receiver-reserved _-dirs so this
 # can run straight against a live ~/onionwarden receiver tree).
@@ -150,7 +161,9 @@ host_count=$(printf '%s\n' $hosts | grep -c . || true)
 # `role = "..."` > "unknown".
 role_of() {
   local host=$1 r=""
-  if [ -n "$roles_map" ] && [ -f "$roles_map" ] && [ ! -L "$roles_map" ]; then
+  # --roles-map is validated up front (existence, regular-file, non-symlink,
+  # readable), so a non-empty value here is known-usable.
+  if [ -n "$roles_map" ]; then
     r=$(awk -v h="$host" '$1==h{print $2; exit}' "$roles_map" 2>/dev/null || true)
   fi
   # Refuse symlinked metadata files for the same reason membership_table refuses

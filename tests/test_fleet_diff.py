@@ -176,6 +176,29 @@ def test_roles_map_overrides_role_file(tmp_path):
     assert roles == {"tor-relay"}  # roles-map wins over per-host role file
 
 
+def test_unusable_roles_map_fails_fast(tmp_path):
+    """A --roles-map that is missing, symlinked, or unreadable must abort with a
+    clear error rather than silently falling back to per-host metadata (which
+    would change the role inventory with no signal)."""
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    _host(fleet, "h1", role="generic", states={"ssh": ["sshd x 1"]})
+
+    # missing
+    r = _run(fleet, "--indicators", "ssh", "--roles-map",
+             str(tmp_path / "nope.map"))
+    assert r.returncode != 0 and "roles-map does not exist" in r.stderr
+
+    # symlink
+    secret = tmp_path / "secret.map"
+    secret.write_text("h1 SECRETROLE\n")
+    link = tmp_path / "link.map"
+    link.symlink_to(secret)
+    r = _run(fleet, "--indicators", "ssh", "--roles-map", str(link))
+    assert r.returncode != 0 and "must not be a symlink" in r.stderr
+    assert "SECRETROLE" not in r.stdout
+
+
 # --- missing-baseline error path -------------------------------------------
 
 def test_missing_baseline_is_strict_error(tmp_path):
@@ -282,7 +305,13 @@ def test_symlinked_state_file_is_not_followed(tmp_path):
     r = _run(fleet, "--indicators", "ports")
     assert "SECRETLEAK" not in r.stdout
     assert "SECRETLEAK" not in r.stderr
-    doc, _ = _json(fleet, "--indicators", "ports")
+    # relay-b's only *.state is a symlink, so it has no *real* state file and is
+    # treated as a broken baseline — strict mode (default) refuses to report.
+    assert r.returncode == 3
+    assert "relay-b" in r.stderr
+    # With --no-strict the broken host is dropped and the rest is reported; the
+    # symlinked secret never reaches the JSON.
+    doc, _ = _json(fleet, "--no-strict", "--indicators", "ports")
     role = next(x for x in doc["roles"] if x["role"] == "tor-relay")
     lines = [d["line"] for d in role["indicators"]["ports"]["divergences"]]
     assert all("SECRETLEAK" not in ln for ln in lines)
