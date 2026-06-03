@@ -101,7 +101,13 @@ resolve_state_dir() {
       return 0
     fi
   fi
-  if [ ! -L "$hd/baseline" ] && [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
+  if [ ! -L "$hd/baseline" ] && [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then
+    # shellcheck disable=SC2012
+    if ls "$hd/baseline/state"/*.state >/dev/null 2>&1; then
+      printf '%s' "$hd/baseline"
+      return 0
+    fi
+  fi
   return 1
 }
 
