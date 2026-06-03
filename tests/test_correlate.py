@@ -127,6 +127,25 @@ def test_coarse_mode_clusters_differing_observed(tmp_path):
                for c in doc["clusters"])
 
 
+def test_fanout_later_window_is_larger_and_more_severe(tmp_path):
+    """An earlier qualifying WARN window (2 hosts) must not mask a later,
+    larger CRIT window (3 hosts) for the same key. We keep the WORST window."""
+    # earlier WARN cluster: relay-a + relay-b, both WARN, near 00:00
+    _ev(tmp_path, "relay-a", seq=1, sev="WARN", recv_ts="2026-05-29T00:00:00Z")
+    _ev(tmp_path, "relay-b", seq=1, sev="WARN", recv_ts="2026-05-29T00:03:00Z")
+    # later, worse cluster: 3 distinct hosts, one CRIT, near 10:00
+    _ev(tmp_path, "relay-a", seq=2, sev="WARN", recv_ts="2026-05-29T10:00:00Z")
+    _ev(tmp_path, "relay-b", seq=2, sev="WARN", recv_ts="2026-05-29T10:02:00Z")
+    _ev(tmp_path, "relay-c", seq=1, sev="CRIT", recv_ts="2026-05-29T10:05:00Z")
+    doc = _json(tmp_path, "2026-05-29T10:30:00Z", "--min-hosts", "2",
+                "--window-min", "10")
+    fan = [c for c in doc["clusters"] if c["kind"] == "fan-out"]
+    assert len(fan) == 1
+    assert fan[0]["severity"] == "CRIT"
+    assert fan[0]["host_count"] == 3
+    assert set(fan[0]["hosts"]) == {"relay-a", "relay-b", "relay-c"}
+
+
 # --- threshold + window tuning ---------------------------------------------
 
 def test_min_hosts_threshold(tmp_path):
@@ -246,6 +265,16 @@ def test_quiet_suppresses_clean_line(tmp_path):
 def test_min_hosts_below_two_rejected(tmp_path):
     r = _run(tmp_path, "2026-05-29T10:30:00Z", "--min-hosts", "1")
     assert r.returncode == 1
+
+
+def test_nonpositive_tuning_values_rejected(tmp_path):
+    """--window-min/--since-min/--stale-min must fail fast on <= 0, like
+    --min-hosts: a zero/negative window or lookback is nonsensical."""
+    for flag in ("--window-min", "--since-min", "--stale-min"):
+        for bad in ("0", "-1"):
+            r = _run(tmp_path, "2026-05-29T10:30:00Z", flag, bad)
+            assert r.returncode == 1, "%s %s should be rejected" % (flag, bad)
+            assert flag in r.stderr
 
 
 def test_correlate_subcommand_accepted(tmp_path):

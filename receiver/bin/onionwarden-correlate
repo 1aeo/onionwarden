@@ -196,6 +196,10 @@ def _windowed_clusters(buckets, min_hosts, window_s):
         # the current window so repeated lines from one host cannot inflate it.
         host_counts = {}
         left = 0
+        # Keep the WORST qualifying window, not the first: an earlier, smaller
+        # WARN window must not mask a later 5-host or CRIT window for this key.
+        # Rank candidates by (severity CRIT>WARN, host count, recency).
+        best = None  # (rank_tuple, sev, hosts, first_t, last_t, sample)
         for right, (t, host, _severity, _smp) in enumerate(events):
             host_counts[host] = host_counts.get(host, 0) + 1
             while t - events[left][0] > window_s:
@@ -213,9 +217,12 @@ def _windowed_clusters(buckets, min_hosts, window_s):
                 sample = window_events[-1][3]
                 first_t, last_t = events[left][0], t
                 hosts = list(host_counts.keys())
-                break
-        else:
+                rank = (1 if sev == "CRIT" else 0, len(hosts), last_t)
+                if best is None or rank > best[0]:
+                    best = (rank, sev, hosts, first_t, last_t, sample)
+        if best is None:
             continue
+        _, sev, hosts, first_t, last_t, sample = best
         out.append((key, sev, hosts, first_t, last_t, sample))
     return out
 
@@ -262,10 +269,10 @@ def correlate(min_hosts, window_min, since_min, stale_min, coarse, fmt, quiet):
 
     clusters = []
 
-    for key, sev, hosts, first_t, last_t in (
-            (k, s, h, f, l) for (k, s, h, f, l, _smp)
-            in _windowed_clusters(fanout, min_hosts, window_s)):
-        smp = next(b[3] for b in fanout[key])
+    for key, sev, hosts, first_t, last_t, smp in _windowed_clusters(
+            fanout, min_hosts, window_s):
+        # Use the sample from the qualifying window, not the first ever seen for
+        # this key — a stale repeat outside the cluster must not be surfaced.
         clusters.append(Cluster("fan-out", key, sev, hosts, first_t, last_t, smp))
 
     for key, sev, hosts, first_t, last_t, smp in _windowed_clusters(
@@ -353,6 +360,12 @@ def main(argv):
         sys.stderr.write("correlate: --format must be text|json\n"); return 1
     if min_hosts < 2:
         sys.stderr.write("correlate: --min-hosts must be >= 2\n"); return 1
+    if window_min <= 0:
+        sys.stderr.write("correlate: --window-min must be > 0\n"); return 1
+    if since_min <= 0:
+        sys.stderr.write("correlate: --since-min must be > 0\n"); return 1
+    if stale_min <= 0:
+        sys.stderr.write("correlate: --stale-min must be > 0\n"); return 1
     return correlate(min_hosts, window_min, since_min, stale_min,
                      coarse, fmt, quiet)
 
