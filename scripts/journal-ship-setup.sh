@@ -74,6 +74,14 @@ case "$RECEIVER_URL" in
   *[!A-Za-z0-9._:/%+~=?@#-]*)
     say "ERROR: --receiver-url contains invalid characters"; exit 1 ;;
 esac
+# render() substitutes placeholders sequentially (@URL@, then @CERT_DIR@, then
+# @PORT@). The URL is the only interpolated value that may legitimately contain
+# `@`, so a URL embedding a literal later-pass token (e.g. `@CERT_DIR@` or
+# `@PORT@`) would be silently re-substituted. Reject any `@…@` placeholder token.
+case "$RECEIVER_URL" in
+  *@CERT_DIR@*|*@PORT@*|*@URL@*)
+    say "ERROR: --receiver-url must not contain template placeholders (@…@)"; exit 1 ;;
+esac
 if [ "$HTTP" != 1 ]; then
   case "$RECEIVER_URL" in
     https://*) ;;
