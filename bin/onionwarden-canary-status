@@ -145,7 +145,10 @@ def canary_status(events_path, args):
                 last_warn_crit = t if last_warn_crit is None else max(last_warn_crit, t)
         elif sev == "WARN":
             warn += 1
-            if t is not None:
+            # Only an *unexplained* (unacked) WARN resets the clean-day clock —
+            # an acked WARN is benign, documented noise. Keep this condition in
+            # lockstep with the `unexplained` gate below (line ~152).
+            if t is not None and not is_acked(ev, acks):
                 last_warn_crit = t if last_warn_crit is None else max(last_warn_crit, t)
         elif sev == "INFO":
             info += 1
