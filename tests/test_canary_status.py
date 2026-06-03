@@ -88,7 +88,9 @@ def test_hold_when_too_few_days(tmp_path):
     assert any("clean days" in r for r in doc["reasons"])
 
 
-def test_hold_when_crit_even_if_acked_warn(tmp_path):
+def test_hold_when_crit_even_if_acked(tmp_path):
+    # A CRIT must always block the gate, even when an ack pattern matches it.
+    # Acks may suppress WARNs but never CRITs (see PHASE4_CANARY_PLAYBOOK.md).
     ev = tmp_path / "relay-a" / "events.log"
     _events(ev, [
         (1, "2026-05-20T10:00:00Z", "selfreport", "INFO", "", "", "boot"),
@@ -96,8 +98,11 @@ def test_hold_when_crit_even_if_acked_warn(tmp_path):
          "module nfsd"),
         (3, "2026-05-28T10:00:00Z", "selfreport", "INFO", "", "", "alive"),
     ])
-    doc, rc = _json(ev, "2026-05-28T10:05:00Z")
-    assert rc == 1 and doc["verdict"] == "HOLD"
+    # Ack that explicitly matches the CRIT's check/signal -- still must HOLD.
+    ack = tmp_path / "acks"; ack.write_text("modules/new-module\n")
+    doc, rc = _json(ev, "2026-05-28T10:05:00Z", "--ack-file", str(ack))
+    assert rc == 1
+    assert doc["verdict"] == "HOLD"
     assert doc["counts"]["CRIT"] == 1
     assert doc["unexplained_count"] == 1
 
