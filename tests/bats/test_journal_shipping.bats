@@ -107,6 +107,15 @@ fp() {  # fingerprint every file under $1 (path + content), order-stable
   [ "$status" -ne 0 ]
 }
 
+@test "relay rejects a --receiver-url embedding a render() placeholder" {
+  # @CERT_DIR@/@PORT@ would otherwise be second-order substituted by later
+  # sed passes in render(); the URL is the only @-bearing interpolated value.
+  run "$SHIP" --receiver-url 'https://r.invalid:5555@CERT_DIR@' --print
+  [ "$status" -ne 0 ]
+  run "$SHIP" --receiver-url 'https://r.invalid@PORT@' --print
+  [ "$status" -ne 0 ]
+}
+
 @test "receiver pins ExecStart --output only for a custom --journal-dir" {
   run "$REMOTE" --port 19532 --journal-dir /srv/journals --print
   [ "$status" -eq 0 ]

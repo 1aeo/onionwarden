@@ -82,8 +82,10 @@ enables the uploader. Idempotent.
 
 > **Forward-secure sealing (FSS).** The journald drop-in sets `Seal=yes`, but
 > that only takes effect once the sealing keys exist. Generate them once per
-> host after the drop-in is in place (and store/transcribe the displayed
-> verification key off-box):
+> host after the drop-in is in place. Store the displayed verification key
+> off-box (secrets vault, encrypted access-controlled docs, or a printed copy
+> in physical security) — you'll need it to verify FSS signatures during
+> post-incident forensics:
 >
 > ```sh
 > sudo journalctl --setup-keys
