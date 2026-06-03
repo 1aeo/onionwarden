@@ -31,12 +31,43 @@
 # without -u (same reason onionwarden-snapshot's bundle does).
 set -o pipefail
 
+# print_help — self-contained so it works even when streamed over `bash -s`
+# (where $0 is "bash", not this file, and a sed-on-$0 would print the wrong text).
+print_help() {
+  cat <<'EOF'
+bin/onionwarden-virt-inventory — per-host virtualization inventory
+(OPERATOR_DECISIONS §6, HIGH-RISK). Emits ONE JSON object describing whether
+a host is bare-metal / a VM / a container, plus the DMI + cgroup/namespace
+state that decision rests on.
+
+Read-only: it only runs detection commands and reads /sys + /proc. Degrades
+gracefully when a probe needs root (dmidecode) or is absent. Captures NO
+serial numbers or UUIDs (no PII) — only vendor / product / BIOS-version strings.
+
+The canonical way to run it across the fleet is to STREAM it over SSH:
+
+    ssh <host> 'bash -s' < bin/onionwarden-virt-inventory > inv/<host>.json
+
+Usage:
+  onionwarden-virt-inventory [--host NAME] [--fixture-dir DIR]
+Options:
+  --host NAME        host_id label (default: `hostname`)
+  --fixture-dir DIR  read each probe from a file in DIR instead of running it
+                     live (test/replay mode; see the file names in probe()).
+                     In this mode no live host files are touched.
+EOF
+}
+
 HOST="" FIXDIR=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --host)        HOST=$2; shift 2 ;;
-    --fixture-dir) FIXDIR=$2; shift 2 ;;
-    -h|--help)     sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --host)
+      [ "$#" -ge 2 ] || { printf 'onionwarden-virt-inventory: --host requires a value\n' >&2; exit 1; }
+      HOST=$2; shift 2 ;;
+    --fixture-dir)
+      [ "$#" -ge 2 ] || { printf 'onionwarden-virt-inventory: --fixture-dir requires a value\n' >&2; exit 1; }
+      FIXDIR=$2; shift 2 ;;
+    -h|--help)     print_help; exit 0 ;;
     *) printf 'onionwarden-virt-inventory: unknown argument: %s\n' "$1" >&2; exit 1 ;;
   esac
 done
@@ -63,12 +94,18 @@ json_escape() {
 # otherwise runs the live command. Returns "" on any failure (caller decides).
 fixture() { [ -n "$FIXDIR" ] && [ -f "$FIXDIR/$1" ] && cat "$FIXDIR/$1"; }
 have_fixture() { [ -n "$FIXDIR" ] && [ -f "$FIXDIR/$1" ]; }
+# replay_only — true when we are in --fixture-dir (replay) mode but THIS probe
+# has no fixture file. Replay must stay hermetic: a missing fixture means the
+# probe is treated as "absent", never a fall-through to live /sys, /proc, or
+# dmidecode on the build/CI host (which would make the verdict host-dependent).
+replay_only() { [ -n "$FIXDIR" ] && [ ! -f "$FIXDIR/$1" ]; }
 
 # --- systemd-detect-virt --------------------------------------------------
 # Returns the bare string; "none" when not virtualized; exit 1 maps to "none".
 detect_virt() {  # $1 = ""|--container|--vm ; fixture file name $2
   local out
   if have_fixture "$2"; then fixture "$2"; return 0; fi
+  if replay_only "$2"; then printf 'unknown'; return 0; fi
   if command -v systemd-detect-virt >/dev/null 2>&1; then
     if [ -n "$1" ]; then
       out=$(systemd-detect-virt "$1" 2>/dev/null)
@@ -91,6 +128,7 @@ DV_VM=$(detect_virt --vm detect_virt_vm)
 # --- DMI (sysfs first; dmidecode for system-manufacturer) -----------------
 dmi_sysfs() {  # $1 = dmi file (product_name|sys_vendor|bios_version), fixture $2
   if have_fixture "$2"; then fixture "$2"; return 0; fi
+  if replay_only "$2"; then printf ''; return 0; fi
   if [ -r "$DMI_DIR/$1" ]; then
     tr -d '\n' < "$DMI_DIR/$1" 2>/dev/null
   else
@@ -103,6 +141,7 @@ DMI_BIOS=$(dmi_sysfs bios_version dmi_bios_version)
 
 dmi_manufacturer() {
   if have_fixture dmi_system_manufacturer; then fixture dmi_system_manufacturer; return 0; fi
+  if replay_only dmi_system_manufacturer; then printf ''; return 0; fi
   if command -v dmidecode >/dev/null 2>&1; then
     dmidecode -s system-manufacturer 2>/dev/null | tr -d '\n'
   else
@@ -114,15 +153,22 @@ DMI_MANUF=$(dmi_manufacturer)
 # --- cgroup ----------------------------------------------------------------
 cgroup_version() {
   if have_fixture cgroup_version; then fixture cgroup_version; return 0; fi
-  # v2: /sys/fs/cgroup/cgroup.controllers exists. v1: /sys/fs/cgroup/* per ctrl.
-  if [ -f /sys/fs/cgroup/cgroup.controllers ]; then printf 'v2'
+  if replay_only cgroup_version; then printf 'unknown'; return 0; fi
+  # v2 pure: cgroup.controllers present and no per-controller v1 dirs.
+  # hybrid: cgroup.controllers present AND legacy v1 controller dirs co-exist.
+  # v1: only legacy per-controller dirs. else unknown.
+  if [ -f /sys/fs/cgroup/cgroup.controllers ] \
+     && { [ -d /sys/fs/cgroup/memory ] || [ -d /sys/fs/cgroup/pids ]; }; then
+    printf 'hybrid'
+  elif [ -f /sys/fs/cgroup/cgroup.controllers ]; then printf 'v2'
   elif [ -d /sys/fs/cgroup/memory ] || [ -d /sys/fs/cgroup/pids ]; then
-    [ -f /sys/fs/cgroup/cgroup.controllers ] && printf 'hybrid' || printf 'v1'
+    printf 'v1'
   else printf 'unknown'; fi
 }
 CG_VERSION=$(cgroup_version)
 pid1_cgroup() {
   if have_fixture proc_1_cgroup; then fixture proc_1_cgroup; return 0; fi
+  if replay_only proc_1_cgroup; then printf ''; return 0; fi
   if [ -r "$PROC/1/cgroup" ]; then head -n1 "$PROC/1/cgroup" 2>/dev/null; else printf ''; fi
 }
 CG_PID1=$(pid1_cgroup)
@@ -130,6 +176,7 @@ CG_PID1=$(pid1_cgroup)
 # --- namespaces ------------------------------------------------------------
 ns_types() {
   if have_fixture ns_types; then fixture ns_types; return 0; fi
+  if replay_only ns_types; then printf ''; return 0; fi
   if [ -d "$PROC/self/ns" ]; then
     ls "$PROC/self/ns" 2>/dev/null | sort | tr '\n' ' '
   else printf ''; fi
@@ -137,6 +184,7 @@ ns_types() {
 NS_TYPES=$(ns_types)
 userns_active() {
   if have_fixture userns_active; then fixture userns_active; return 0; fi
+  if replay_only userns_active; then printf 'unknown'; return 0; fi
   # If /proc/self/uid_map maps the full 0..4294967295 range, we're in the
   # initial user namespace (not user-namespaced). Anything else => userns.
   if [ -r "$PROC/self/uid_map" ]; then
