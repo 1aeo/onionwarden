@@ -174,8 +174,23 @@ role_of() {
     r=$(tr -d ' \n\r\t' < "$fleet_dir/$host/role" 2>/dev/null || true)
   fi
   if [ -z "$r" ]; then
-    local hc="$fleet_dir/$host/host.conf"
-    { [ -f "$hc" ] && [ ! -L "$hc" ]; } || hc="$fleet_dir/$host/baseline/host.conf"
+    local hc
+    # Align host.conf lookup with the state dir that resolve_state_dir chose.
+    # This ensures consistency with the state being diffed and inherits the
+    # baseline-symlink check from resolve_state_dir (fixes both the role-leak
+    # via symlinked baseline/ and the receiver-layout precedence bug).
+    if [ -f "$WORK/$host.statedir" ]; then
+      local sd
+      sd=$(cat "$WORK/$host.statedir")
+      hc="$sd/host.conf"
+    else
+      # Fallback for hosts without a resolved state dir: replicate the old
+      # logic but add the missing baseline-symlink check.
+      hc="$fleet_dir/$host/host.conf"
+      if { [ ! -f "$hc" ] || [ -L "$hc" ]; }; then
+        [ ! -L "$fleet_dir/$host/baseline" ] && hc="$fleet_dir/$host/baseline/host.conf"
+      fi
+    fi
     if [ -f "$hc" ] && [ ! -L "$hc" ]; then
       r=$(grep -E '^[[:space:]]*role' "$hc" 2>/dev/null | head -n1 \
         | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' || true)
