@@ -62,7 +62,9 @@ def _now(args):
 
 def read_events(path):
     if not os.path.isfile(path):
-        return
+        sys.stderr.write(
+            "canary-status: events file not found: %s\n" % path)
+        sys.exit(2)
     with open(path, "r", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -121,6 +123,7 @@ def canary_status(events_path, args):
     crit = warn = info = 0
     unexplained = []
     earliest = None
+    last_warn_crit = None
     last_any = None
     host_id = args.get("host") or "?"
 
@@ -138,8 +141,12 @@ def canary_status(events_path, args):
         sev = ev.get("severity", "")
         if sev == "CRIT":
             crit += 1
+            if t is not None:
+                last_warn_crit = t if last_warn_crit is None else max(last_warn_crit, t)
         elif sev == "WARN":
             warn += 1
+            if t is not None:
+                last_warn_crit = t if last_warn_crit is None else max(last_warn_crit, t)
         elif sev == "INFO":
             info += 1
         if sev == "CRIT" or (sev == "WARN" and not is_acked(ev, acks)):
@@ -152,8 +159,9 @@ def canary_status(events_path, args):
                 "summary": ev.get("summary", "")})
 
     observed_days = 0.0
-    if earliest is not None:
-        observed_days = (now - earliest) / 86400.0
+    watch_start = last_warn_crit if last_warn_crit is not None else earliest
+    if watch_start is not None:
+        observed_days = (now - watch_start) / 86400.0
     stale_min = None
     if last_any is not None:
         stale_min = (now - last_any) / 60.0
