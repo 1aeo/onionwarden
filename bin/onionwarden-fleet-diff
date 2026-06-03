@@ -91,7 +91,16 @@ resolve_state_dir() {
   # point <host> at an out-of-tree directory and leak operator-local files into
   # the report. rsync --safe-links covers --from-receiver; this covers --fleet-dir.
   [ ! -L "$hd" ] || return 1
-  if [ -d "$hd/state" ] && [ ! -L "$hd/state" ]; then printf '%s' "$hd"; return 0; fi
+  # Check if state/ exists, is not a symlink, AND contains at least one .state file
+  # before preferring it over baseline/state/. An empty state/ should not shadow
+  # a populated baseline/state/.
+  if [ -d "$hd/state" ] && [ ! -L "$hd/state" ]; then
+    # shellcheck disable=SC2012
+    if ls "$hd/state"/*.state >/dev/null 2>&1; then
+      printf '%s' "$hd"
+      return 0
+    fi
+  fi
   if [ ! -L "$hd/baseline" ] && [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
   return 1
 }
@@ -135,7 +144,7 @@ host_count=$(printf '%s\n' $hosts | grep -c . || true)
 # `role = "..."` > "unknown".
 role_of() {
   local host=$1 r=""
-  if [ -n "$roles_map" ] && [ -f "$roles_map" ]; then
+  if [ -n "$roles_map" ] && [ -f "$roles_map" ] && [ ! -L "$roles_map" ]; then
     r=$(awk -v h="$host" '$1==h{print $2; exit}' "$roles_map" 2>/dev/null || true)
   fi
   # Refuse symlinked metadata files for the same reason membership_table refuses
