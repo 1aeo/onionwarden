@@ -288,6 +288,48 @@ def test_symlinked_state_file_is_not_followed(tmp_path):
     assert all("SECRETLEAK" not in ln for ln in lines)
 
 
+def test_symlinked_host_root_is_not_followed(tmp_path):
+    """The <host> directory itself being a symlink is refused, so a tree cannot
+    redirect a whole host root at an out-of-tree directory holding real state."""
+    secret_host = tmp_path / "outside_host"
+    (secret_host / "state").mkdir(parents=True)
+    (secret_host / "state" / "ports.state").write_text(
+        "listen tcp 0.0.0.0:31337 SECRETLEAK\n")
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    _host(fleet, "relay-a", states={"ports": ["listen tcp 0.0.0.0:9001"]})
+    # relay-b is a symlink to a directory that contains a perfectly real state/.
+    (fleet / "relay-b").symlink_to(secret_host, target_is_directory=True)
+    # A symlinked host root is treated as a missing baseline (rejected), so its
+    # contents never reach the report. --no-strict so we still get JSON to assert.
+    r = _run(fleet, "--indicators", "ports")
+    assert "SECRETLEAK" not in r.stdout
+    assert "SECRETLEAK" not in r.stderr
+    doc, _ = _json(fleet, "--no-strict", "--indicators", "ports")
+    role = next(x for x in doc["roles"] if x["role"] == "tor-relay")
+    lines = [d["line"] for d in role["indicators"]["ports"]["divergences"]]
+    assert all("SECRETLEAK" not in ln for ln in lines)
+
+
+def test_symlinked_role_file_is_not_followed(tmp_path):
+    """A symlinked `role` metadata file must not leak an operator-local file's
+    contents into the report as a role name (parity with state-file handling)."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRETROLELEAK\n")
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    _host(fleet, "relay-a", states={"ports": ["listen tcp 0.0.0.0:9001"]})
+    # relay-b: role file points at an out-of-tree secret.
+    hb = _host(fleet, "relay-b", role=None,
+               states={"ports": ["listen tcp 0.0.0.0:9001"]})
+    (hb / "role").symlink_to(secret)
+    r = _run(fleet, "--indicators", "ports")
+    assert "SECRETROLELEAK" not in r.stdout
+    assert "SECRETROLELEAK" not in r.stderr
+    doc, _ = _json(fleet, "--indicators", "ports")
+    assert all(x["role"] != "SECRETROLELEAK" for x in doc["roles"])
+
+
 def test_symlinked_state_dir_is_not_followed(tmp_path):
     """The 'state' parent dir being a symlink is likewise refused, so a tree
     cannot redirect a whole host's state at an operator-local directory."""

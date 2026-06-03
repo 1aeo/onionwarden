@@ -87,6 +87,10 @@ indicator_state_name() {
 # (<host>/baseline/state/). Prints the resolved dir, or nothing if none.
 resolve_state_dir() {
   local hd=$1
+  # Reject a symlinked host root: with a local --fleet-dir a crafted tree could
+  # point <host> at an out-of-tree directory and leak operator-local files into
+  # the report. rsync --safe-links covers --from-receiver; this covers --fleet-dir.
+  [ ! -L "$hd" ] || return 1
   if [ -d "$hd/state" ] && [ ! -L "$hd/state" ]; then printf '%s' "$hd"; return 0; fi
   if [ ! -L "$hd/baseline" ] && [ -d "$hd/baseline/state" ] && [ ! -L "$hd/baseline/state" ]; then printf '%s' "$hd/baseline"; return 0; fi
   return 1
@@ -134,13 +138,17 @@ role_of() {
   if [ -n "$roles_map" ] && [ -f "$roles_map" ]; then
     r=$(awk -v h="$host" '$1==h{print $2; exit}' "$roles_map" 2>/dev/null || true)
   fi
-  if [ -z "$r" ] && [ -f "$fleet_dir/$host/role" ]; then
+  # Refuse symlinked metadata files for the same reason membership_table refuses
+  # symlinked state files: a malicious --fleet-dir tree could point `role` or
+  # `host.conf` at an operator-local file (e.g. /etc/hostname) and surface its
+  # contents in the report as a role name.
+  if [ -z "$r" ] && [ -f "$fleet_dir/$host/role" ] && [ ! -L "$fleet_dir/$host/role" ]; then
     r=$(tr -d ' \n\r\t' < "$fleet_dir/$host/role" 2>/dev/null || true)
   fi
   if [ -z "$r" ]; then
     local hc="$fleet_dir/$host/host.conf"
-    [ -f "$hc" ] || hc="$fleet_dir/$host/baseline/host.conf"
-    if [ -f "$hc" ]; then
+    { [ -f "$hc" ] && [ ! -L "$hc" ]; } || hc="$fleet_dir/$host/baseline/host.conf"
+    if [ -f "$hc" ] && [ ! -L "$hc" ]; then
       r=$(grep -E '^[[:space:]]*role' "$hc" 2>/dev/null | head -n1 \
         | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' || true)
     fi
