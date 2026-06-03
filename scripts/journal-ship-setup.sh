@@ -130,7 +130,7 @@ if [ "$HTTP" != 1 ] && [ "$DRY" != 1 ] && [ "$PRINT" != 1 ]; then
 fi
 
 if [ "$ENABLE" = 1 ]; then
-  if [ -n "$ROOT" ]; then
+  if [ -n "$ROOT" ] && [ "$DRY" != 1 ]; then
     say "--enable cannot be combined with --root (would restart live host units"
     say "instead of using the files rendered under $ROOT)"
     exit 1

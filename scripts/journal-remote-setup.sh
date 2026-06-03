@@ -99,7 +99,7 @@ if [ "$HTTP" != 1 ] && [ "$DRY" != 1 ]; then
 fi
 
 if [ "$ENABLE" = 1 ]; then
-  if [ -n "$ROOT" ]; then
+  if [ -n "$ROOT" ] && [ "$DRY" != 1 ]; then
     say "--enable cannot be combined with --root (would toggle the live host unit"
     say "against on-host config, not the files rendered under $ROOT)"
     exit 1
