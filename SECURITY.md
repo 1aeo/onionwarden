@@ -102,8 +102,12 @@ posture:
    (auto-bootstrapped via `unbound-anchor` then ownership-fixed to
    `unbound:unbound`).
 4. **`/etc/resolv.conf` is a real file** pointing only to `127.0.0.1` — not a
-   symlink to `systemd-resolved`, which we observed leaking memory under
-   sustained high parallel DNS load.
+   symlink to `systemd-resolved`. Fleet-specific observation: on our Ubuntu
+   24.04 hosts, `systemd-resolved` 255.4-1ubuntu8.15 leaked memory and stopped
+   answering on `127.0.0.53` under sustained high parallel DNS load (surfaced
+   2026-05-27 during onionleak's parallel ExoneraTor enrichment, where 711 of
+   833 lookups timed out). Treat this as an observed incident on that specific
+   stack, not a universal claim about `systemd-resolved`.
 5. **`systemd-resolved` stopped and masked** (`systemctl stop systemd-resolved
    && systemctl mask systemd-resolved`). Prefer this deterministic
    stop-then-mask over a broad `pkill -f`, which can match unrelated processes.
@@ -162,5 +166,20 @@ Please include:
 - a description of the issue and its impact under the threat model above,
 - reproduction steps or a proof-of-concept where possible.
 
-Do not open a public issue for an unfixed vulnerability. We aim to acknowledge
-reports promptly and will coordinate disclosure timing with the reporter.
+Do not open a public issue for an unfixed vulnerability.
+
+We aim to meet the following response targets:
+
+- **Acknowledgement** — within 72 hours of receipt.
+- **Initial triage / severity assessment** — within 7 days, with a first status
+  update to the reporter.
+- **Mitigation / patch** — severity-based, as a target rather than a guarantee:
+  critical within 14 days, high within 30 days, medium/low on a best-effort
+  basis.
+- **Coordinated disclosure** — we coordinate public disclosure timing with the
+  reporter, normally after a fix is available, or within 90 days of the report
+  if no fix has shipped.
+
+Status updates are sent to the reporting channel used (the GitHub private
+advisory thread, or the email thread). These targets accompany the rule above:
+do not open a public issue for an unfixed vulnerability.
