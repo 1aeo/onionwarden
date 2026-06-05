@@ -264,7 +264,11 @@ def canary_status(events_path, args):
         if t is not None and (last_any is None or t > last_any):
             last_any = t
         if since_cut is not None and t is not None and t < since_cut:
-            continue
+            # Skip old events EXCEPT for CRIT findings (Option D: CRIT never skipped)
+            is_crit = (ev.get("kind") == "finding" and
+                       ev.get("severity") == "CRIT")
+            if not is_crit:
+                continue
         if ev.get("host_id"):
             host_id = ev["host_id"]
         if t is not None:
