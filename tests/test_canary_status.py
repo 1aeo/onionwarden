@@ -1,9 +1,13 @@
 """Phase-4 canary rollout health (`bin/onionwarden-canary-status`).
 
-Turns "has the canary been quiet for long enough?" into a PASS/HOLD verdict
-against the signoff gate (docs/PHASE4_CANARY_PLAYBOOK.md): >= require-days of
-observation, zero UNEXPLAINED WARN/CRIT, and the canary not stale. Events are
-fixture-built with recv_ts and `now` pinned via --now-epoch for determinism.
+Turns "has the canary been quiet for long enough?" into a three-state verdict
+(Option D) against the signoff gate (docs/PHASE4_CANARY_PLAYBOOK.md):
+  * PASS — >= require-days observed, zero unexplained WARN, not stale, zero CRIT.
+  * HOLD — any of the above unmet, OR a CRIT that is not validly acknowledged.
+  * WARN — would PASS but for a CRIT the operator acknowledged with a documented,
+           non-expired, non-self-signed ack ("eyes open"); never promotes to PASS.
+Events are fixture-built with recv_ts and `now` pinned via --now-epoch for
+determinism. CRIT acks are recorded via the audited `ack` subcommand.
 """
 import calendar
 import json
@@ -44,6 +48,35 @@ def _run(events, now_iso, *args):
 def _json(events, now_iso, *args):
     r = _run(events, now_iso, "--format", "json", *args)
     return json.loads(r.stdout), r.returncode
+
+
+def _ack(now_iso, store, finding_id, reason="benign", signer="operator",
+         *extra):
+    """Drive the `ack` subcommand; returns the CompletedProcess."""
+    cmd = ["python3", str(CANARY), "ack",
+           "--finding-id", finding_id, "--ack-store", str(store),
+           "--now-epoch", str(_epoch(now_iso)), "--signer", signer]
+    if reason is not None:
+        cmd += ["--reason", reason]
+    return subprocess.run(cmd + list(extra), capture_output=True, text=True)
+
+
+# fixture: 8 days of life with a single CRIT early on, otherwise clean. Absent
+# the CRIT this PASSes — so the CRIT alone decides PASS/HOLD/WARN.
+def _crit8(path):
+    _events(path, [
+        (1, "2026-05-20T10:00:00Z", "selfreport", "INFO", "", "", "boot"),
+        (2, "2026-05-23T10:00:00Z", "finding", "CRIT", "modules", "new-module",
+         "module nfsd"),
+        (3, "2026-05-28T11:00:00Z", "selfreport", "INFO", "", "", "alive"),
+    ])
+
+
+def _crit_finding_id(ev, now_iso="2026-05-28T11:10:00Z"):
+    doc, _ = _json(ev, now_iso)
+    crits = [u for u in doc["unexplained"] if u["severity"] == "CRIT"]
+    assert crits, "fixture should surface a blocking CRIT"
+    return crits[0]["finding_id"]
 
 
 # baseline fixture: 8 days of life, one WARN early on.
@@ -88,23 +121,98 @@ def test_hold_when_too_few_days(tmp_path):
     assert any("clean days" in r for r in doc["reasons"])
 
 
-def test_hold_when_crit_even_if_acked(tmp_path):
-    # A CRIT must always block the gate, even when an ack pattern matches it.
-    # Acks may suppress WARNs but never CRITs (see PHASE4_CANARY_PLAYBOOK.md).
+# --- Option D: three-state CRIT verdict (PASS / HOLD / WARN) ---
+
+def test_pass_when_no_crit(tmp_path):
+    # Green path: clean window, no CRIT -> PASS (exit 0).
     ev = tmp_path / "relay-a" / "events.log"
-    _events(ev, [
-        (1, "2026-05-20T10:00:00Z", "selfreport", "INFO", "", "", "boot"),
-        (2, "2026-05-25T10:00:00Z", "finding", "CRIT", "modules", "new-module",
-         "module nfsd"),
-        (3, "2026-05-28T10:00:00Z", "selfreport", "INFO", "", "", "alive"),
-    ])
-    # Ack that explicitly matches the CRIT's check/signal -- still must HOLD.
-    ack = tmp_path / "acks"; ack.write_text("modules/new-module\n")
-    doc, rc = _json(ev, "2026-05-28T10:05:00Z", "--ack-file", str(ack))
-    assert rc == 1
-    assert doc["verdict"] == "HOLD"
+    _clean8(ev)
+    ack = tmp_path / "acks"; ack.write_text("clock/unsynced  # benign\n")
+    doc, rc = _json(ev, "2026-05-28T11:10:00Z", "--ack-file", str(ack))
+    assert rc == 0 and doc["verdict"] == "PASS"
+    assert doc["counts"]["CRIT"] == 0
+    assert doc["acked_crit_count"] == 0
+
+
+def test_hold_when_crit_unacked(tmp_path):
+    # A CRIT with no ack blocks the gate -> HOLD (exit 1), never PASS.
+    ev = tmp_path / "relay-a" / "events.log"
+    _crit8(ev)
+    store = tmp_path / "acks.jsonl"  # exists-but-empty / absent: no acks
+    doc, rc = _json(ev, "2026-05-28T11:10:00Z", "--ack-store", str(store))
+    assert rc == 1 and doc["verdict"] == "HOLD"
     assert doc["counts"]["CRIT"] == 1
-    assert doc["unexplained_count"] == 1
+    assert doc["acked_crit_count"] == 0
+    crit = [u for u in doc["unexplained"] if u["severity"] == "CRIT"]
+    assert crit and crit[0]["ack_state"] == "none"
+
+
+def test_warn_when_crit_acked(tmp_path):
+    # A CRIT acked with a documented, valid, non-self-signed ack downgrades
+    # HOLD -> WARN (exit 3) -- "rolling forward with eyes open", NOT PASS.
+    ev = tmp_path / "relay-a" / "events.log"
+    _crit8(ev)
+    store = tmp_path / "acks.jsonl"
+    fid = _crit_finding_id(ev)
+    r = _ack("2026-05-28T11:00:00Z", store, fid,
+             reason="nfsd is expected on this NFS-backed canary", signer="op")
+    assert r.returncode == 0, r.stderr
+    doc, rc = _json(ev, "2026-05-28T11:10:00Z", "--ack-store", str(store))
+    assert rc == 3 and doc["verdict"] == "WARN"
+    assert doc["counts"]["CRIT"] == 1
+    assert doc["acked_crit_count"] == 1
+    assert doc["unexplained_count"] == 0
+    assert doc["acked_crits"][0]["ack_signer"] == "op"
+    assert "nfsd" in doc["acked_crits"][0]["ack_reason"]
+    # default fleet gate is conservative (pass-only) -> WARN does not roll fwd.
+    assert doc["gate_pass"] is False
+    # a pass-warn wave may roll forward on WARN.
+    doc2, _ = _json(ev, "2026-05-28T11:10:00Z", "--ack-store", str(store),
+                    "--rollout-gate", "pass-warn")
+    assert doc2["verdict"] == "WARN" and doc2["gate_pass"] is True
+
+
+def test_hold_when_ack_expired(tmp_path):
+    # An ack older than its TTL is no longer valid -> back to HOLD.
+    ev = tmp_path / "relay-a" / "events.log"
+    _crit8(ev)
+    store = tmp_path / "acks.jsonl"
+    fid = _crit_finding_id(ev)
+    # ack 5 days before "now" with the default 72h TTL -> expired.
+    r = _ack("2026-05-23T11:00:00Z", store, fid, reason="looked benign",
+             signer="op")
+    assert r.returncode == 0, r.stderr
+    doc, rc = _json(ev, "2026-05-28T11:10:00Z", "--ack-store", str(store))
+    assert rc == 1 and doc["verdict"] == "HOLD"
+    assert doc["acked_crit_count"] == 0
+    crit = [u for u in doc["unexplained"] if u["severity"] == "CRIT"]
+    assert crit and crit[0]["ack_state"] == "expired"
+
+
+def test_hold_when_ack_self_signed(tmp_path):
+    # An ack signed by the same identity that triggered the alert (the finding's
+    # host_id) is auditable but never gate-valid -> HOLD.
+    ev = tmp_path / "relay-a" / "events.log"  # host_id == "relay-a"
+    _crit8(ev)
+    store = tmp_path / "acks.jsonl"
+    fid = _crit_finding_id(ev)
+    r = _ack("2026-05-28T11:00:00Z", store, fid, reason="trust me",
+             signer="relay-a")  # == triggering host_id -> self-signed
+    assert r.returncode == 0, r.stderr
+    doc, rc = _json(ev, "2026-05-28T11:10:00Z", "--ack-store", str(store))
+    assert rc == 1 and doc["verdict"] == "HOLD"
+    assert doc["acked_crit_count"] == 0
+    crit = [u for u in doc["unexplained"] if u["severity"] == "CRIT"]
+    assert crit and crit[0]["ack_state"] == "self"
+
+
+def test_reason_required_for_ack(tmp_path):
+    # The ack subcommand rejects a missing --reason at parse time (exit 2).
+    store = tmp_path / "acks.jsonl"
+    r = _ack("2026-05-28T11:00:00Z", store, "deadbeefdeadbeef", reason=None)
+    assert r.returncode == 2
+    assert "reason" in r.stderr
+    assert not store.exists()  # nothing written on a rejected ack
 
 
 def test_hold_when_stale(tmp_path):

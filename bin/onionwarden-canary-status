@@ -3,46 +3,86 @@
 
 Phase 4 deploys onionwarden to ONE canary relay with `alert_push_level=warn`
 (push everything to learn the noise floor) and holds there until the canary has
-run clean. This tool turns "has the canary been quiet?" into a single PASS/HOLD
-verdict against the signoff gate in docs/PHASE4_CANARY_PLAYBOOK.md:
+run clean. This tool turns "has the canary been quiet?" into a single
+three-state verdict against the signoff gate in docs/PHASE4_CANARY_PLAYBOOK.md:
 
     PASS  when  observed_days >= --require-days  (default 7)
-          AND   zero UNEXPLAINED WARN/CRIT findings in the window
+          AND   zero UNEXPLAINED WARN findings in the window
           AND   the canary is not stale (still reporting)
+          AND   ZERO CRIT findings.
+
+    WARN  when  the canary would PASS but for a CRIT that the operator has
+          acknowledged with a documented reason. "Had a CRIT, acked with a
+          reason, rolling forward with eyes open" — distinct from PASS.
+
+    HOLD  otherwise: not enough clean days, an unexplained WARN, a stale
+          canary, OR a CRIT that is not validly acknowledged (no ack, an
+          expired ack, or a self-signed ack).
+
+This is Option D (see PHASE4_CANARY_PLAYBOOK.md "CRIT acknowledgement"): a CRIT
+NEVER promotes to PASS. A documented, valid ack only downgrades HOLD -> WARN.
 
 It reads the canary's append-only events.log (the receiver's copy is the
-authoritative one — it's cross-checked and the host cannot rewrite it). An
-"unexplained" alert is any WARN/CRIT finding NOT matched by the operator's
---ack-file; that file is how the operator records "I looked at this WARN and it's
-a known-benign noise-floor item," which is exactly the Phase-4 learning loop.
+authoritative one — it's cross-checked and the host cannot rewrite it).
+
+Two acknowledgement mechanisms, by severity:
+  * WARN  — the substring `--ack-file` (the noise-floor learning loop). A WARN
+            matched by an ack pattern is "explained" and drops out of the gate.
+  * CRIT  — the audited structured ack store (`ack` subcommand below). A CRIT
+            can ONLY be acked there, because a CRIT ack must carry a reason, a
+            signer, a timestamp and a TTL — none of which a pattern file holds.
+            A pattern in --ack-file does NOT ack a CRIT.
+
+Subcommands:
+  (status)   default — print the verdict (this is the original behaviour;
+             `status` may be given explicitly).
+  ack        record an audited acknowledgement of a CRIT finding:
+                 onionwarden-canary-status ack \\
+                     --finding-id <hash> --reason "<text>" [--signer <id>] \\
+                     [--ttl-hours N] [--ack-store FILE]
+             --reason is MANDATORY. The record (finding hash + timestamp +
+             signer + reason + TTL) is appended to the ack store
+             (default /var/lib/onionwarden/canary/acks.jsonl). An ack signed by
+             the same identity that triggered the alert (the finding's host_id)
+             is recorded but rejected at gate time as self-signed.
 
 Event source (one of):
   --events FILE              path to the canary's events.log
   --receiver-root DIR --host H   resolves to DIR/H/events.log
   (else: $ONIONWARDEN_RECEIVER_ROOT + --host)
 
-Options:
+Status options:
   --require-days N    days of clean observation required to PASS (default 7)
   --stale-min M       no event for M minutes => canary is dark (default 30)
-  --ack-file FILE     one acknowledgement pattern per line (see below)
+  --ack-file FILE     one WARN acknowledgement pattern per line (see below)
+  --ack-store FILE    structured CRIT ack store (default
+                      /var/lib/onionwarden/canary/acks.jsonl)
+  --rollout-gate G    fleet auto-rollout gate this verdict feeds: pass-only
+                      (default, conservative) or pass-warn. Sets `gate_pass` in
+                      the output; does NOT change the verdict or exit code.
   --since-days D      only consider events newer than D days (default: all)
   --now-epoch E       pin "now" (UTC epoch) for deterministic runs/tests
   --format text|json
 
-ack-file lines (blank lines and #-comments ignored) match a finding if the line
-is a substring of the finding's "signal", "check", "summary", or "observed", or
-equals its run_id or seq. e.g.:
+ack-file lines (blank lines and #-comments ignored) match a WARN finding if the
+line is a substring of the finding's "signal", "check", "summary", or
+"observed", or equals its run_id or seq. e.g.:
     clock/unsynced          # NTP not yet settled on first boot — benign
     run_id=2026-05-29T...    # a specific reviewed run
     snap                     # snap-revision churn during apt week
 
-Exit: 0 PASS, 1 HOLD (gate not yet met), 2 usage error.
+Exit: 0 PASS, 1 HOLD, 3 WARN, 2 usage error.
 """
 import calendar
+import getpass
+import hashlib
 import json
 import os
 import sys
 import time
+
+DEFAULT_ACK_STORE = "/var/lib/onionwarden/canary/acks.jsonl"
+DEFAULT_TTL_HOURS = 72
 
 
 def _parse_ts(s):
@@ -54,10 +94,29 @@ def _parse_ts(s):
         return None
 
 
+def _iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
 def _now(args):
     if args.get("now_epoch") is not None:
         return float(args["now_epoch"])
     return time.time()
+
+
+def finding_id(ev):
+    """Stable short hash identifying a finding (the 'alert hash').
+
+    Built from the fields that pin an alert to a specific host/run/check so the
+    operator can ack exactly one finding and nothing else. Truncated sha256 —
+    collision risk is negligible for a single canary's event stream.
+    """
+    detail = ev.get("detail") or {}
+    canon = "|".join(str(x) for x in (
+        ev.get("host_id", ""), ev.get("run_id", ""), ev.get("seq", ""),
+        ev.get("severity", ""), detail.get("check", ""),
+        detail.get("signal", "")))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 
 
 def read_events(path):
@@ -99,6 +158,73 @@ def load_acks(path):
     return pats
 
 
+def load_ack_store(path):
+    """Read the structured (CRIT) ack store: finding_id -> [ack records].
+
+    A missing store is fine — acks are optional. The store is append-only audit
+    JSONL; we keep every record so self-signed / expired acks remain visible and
+    auditable, and resolve validity per-finding at gate time.
+    """
+    store = {}
+    if not path or not os.path.isfile(path):
+        return store
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                fid = rec.get("finding_id")
+                if fid:
+                    store.setdefault(fid, []).append(rec)
+    except OSError as exc:
+        sys.stderr.write(
+            "canary-status: cannot read --ack-store %s: %s\n" % (path, exc))
+        sys.exit(2)
+    return store
+
+
+def ack_state(ev, store, now):
+    """Resolve the ack state of a finding from the structured store.
+
+    Returns (state, record) where state is one of:
+      "valid"   — a non-expired, non-self-signed ack exists (record returned)
+      "expired" — only expired acks exist
+      "self"    — only self-signed acks exist (signer == triggering host_id)
+      "none"    — no ack record for this finding
+    A finding triggered by host_id H acked by signer H is self-signed: recorded
+    for the audit trail but never gate-valid (the alert can't clear itself).
+    """
+    recs = store.get(finding_id(ev), [])
+    if not recs:
+        return ("none", None)
+    trigger = str(ev.get("host_id", ""))
+    saw_expired = saw_self = False
+    for rec in recs:
+        signer = str(rec.get("signer", ""))
+        if signer and trigger and signer == trigger:
+            saw_self = True
+            continue
+        ack_ts = _parse_ts(rec.get("ts"))
+        try:
+            ttl_s = float(rec.get("ttl_hours", DEFAULT_TTL_HOURS)) * 3600.0
+        except (TypeError, ValueError):
+            ttl_s = DEFAULT_TTL_HOURS * 3600.0
+        if ack_ts is None or now > ack_ts + ttl_s:
+            saw_expired = True
+            continue
+        return ("valid", rec)
+    if saw_expired:
+        return ("expired", None)
+    if saw_self:
+        return ("self", None)
+    return ("none", None)
+
+
 def is_acked(ev, pats):
     detail = ev.get("detail") or {}
     hay = [str(ev.get("run_id", "")), "run_id=%s" % ev.get("run_id", ""),
@@ -119,9 +245,16 @@ def canary_status(events_path, args):
     if args.get("since_days") is not None:
         since_cut = now - args["since_days"] * 86400
     acks = load_acks(args.get("ack_file"))
+    store_path = (args.get("ack_store")
+                  or os.environ.get("ONIONWARDEN_CANARY_ACK_STORE")
+                  or DEFAULT_ACK_STORE)
+    store = load_ack_store(store_path)
 
     crit = warn = info = 0
-    unexplained = []
+    unexplained = []          # unacked WARN + blocking CRIT (the gate blockers)
+    unexplained_warn = 0      # unacked WARNs only (drives the base gate)
+    crit_blocking = 0         # CRITs with no valid ack (none/expired/self)
+    acked_crits = []          # CRITs cleared by a valid, documented ack
     earliest = None
     last_warn_crit = None
     last_any = None
@@ -139,30 +272,50 @@ def canary_status(events_path, args):
         if ev.get("kind") != "finding":
             continue
         sev = ev.get("severity", "")
+        detail = ev.get("detail") or {}
+        fid = finding_id(ev)
+        signal = "%s/%s" % (detail.get("check", "?"), detail.get("signal", "?"))
         if sev == "CRIT":
             crit += 1
-            # Only an *unexplained* (unacked) CRIT resets the clean-day clock —
-            # an acked CRIT is a resolved issue. Keep this condition in lockstep
-            # with WARN handling and the `unexplained` gate below.
-            if t is not None and not is_acked(ev, acks):
-                last_warn_crit = t if last_warn_crit is None else max(last_warn_crit, t)
+            # Option D: a CRIT is cleared ONLY by a valid structured ack (and
+            # even then only to WARN, never PASS). Pattern --ack-file never acks
+            # a CRIT. An expired / self-signed / absent ack keeps it blocking.
+            state, rec = ack_state(ev, store, now)
+            if state == "valid":
+                acked_crits.append({
+                    "seq": ev.get("seq"), "finding_id": fid,
+                    "ts": ev.get("recv_ts") or ev.get("ts"),
+                    "signal": signal, "summary": ev.get("summary", ""),
+                    "ack_reason": rec.get("reason", ""),
+                    "ack_signer": rec.get("signer", ""),
+                    "ack_ts": rec.get("ts", "")})
+                # documented & resolved: does NOT reset the clean-day clock.
+            else:
+                crit_blocking += 1
+                if t is not None:
+                    last_warn_crit = (t if last_warn_crit is None
+                                      else max(last_warn_crit, t))
+                unexplained.append({
+                    "seq": ev.get("seq"), "severity": sev, "finding_id": fid,
+                    "ts": ev.get("recv_ts") or ev.get("ts"),
+                    "signal": signal, "summary": ev.get("summary", ""),
+                    "ack_state": state})
         elif sev == "WARN":
             warn += 1
-            # Only an *unexplained* (unacked) WARN resets the clean-day clock —
-            # an acked WARN is benign, documented noise. Keep this condition in
-            # lockstep with the `unexplained` gate below (line ~152).
-            if t is not None and not is_acked(ev, acks):
-                last_warn_crit = t if last_warn_crit is None else max(last_warn_crit, t)
+            warn_acked = (is_acked(ev, acks)
+                          or ack_state(ev, store, now)[0] == "valid")
+            if not warn_acked:
+                unexplained_warn += 1
+                if t is not None:
+                    last_warn_crit = (t if last_warn_crit is None
+                                      else max(last_warn_crit, t))
+                unexplained.append({
+                    "seq": ev.get("seq"), "severity": sev, "finding_id": fid,
+                    "ts": ev.get("recv_ts") or ev.get("ts"),
+                    "signal": signal, "summary": ev.get("summary", ""),
+                    "ack_state": "none"})
         elif sev == "INFO":
             info += 1
-        if (sev == "CRIT" and not is_acked(ev, acks)) or (sev == "WARN" and not is_acked(ev, acks)):
-            detail = ev.get("detail") or {}
-            unexplained.append({
-                "seq": ev.get("seq"), "severity": sev,
-                "ts": ev.get("recv_ts") or ev.get("ts"),
-                "signal": "%s/%s" % (detail.get("check", "?"),
-                                     detail.get("signal", "?")),
-                "summary": ev.get("summary", "")})
 
     observed_days = 0.0
     watch_start = last_warn_crit if last_warn_crit is not None else earliest
@@ -177,8 +330,8 @@ def canary_status(events_path, args):
     if observed_days < args["require_days"]:
         reasons.append("only %.1f of %d required clean days observed"
                        % (observed_days, args["require_days"]))
-    if unexplained:
-        reasons.append("%d unexplained WARN/CRIT finding(s)" % len(unexplained))
+    if unexplained_warn:
+        reasons.append("%d unexplained WARN finding(s)" % unexplained_warn)
     if is_stale:
         if last_any is None:
             reasons.append("no events from the canary yet")
@@ -186,7 +339,28 @@ def canary_status(events_path, args):
             reasons.append("canary is STALE — last event %.0f min ago (> %d)"
                            % (stale_min, args["stale_min"]))
 
-    verdict = "PASS" if not reasons else "HOLD"
+    base_block = bool(reasons)
+
+    # Option D three-state verdict. CRIT never reaches PASS.
+    if crit_blocking > 0:
+        verdict = "HOLD"
+        reasons.append(
+            "%d CRIT finding(s) not validly acknowledged "
+            "(no ack / expired / self-signed) — blocks rollout" % crit_blocking)
+    elif acked_crits:
+        if base_block:
+            verdict = "HOLD"
+        else:
+            verdict = "WARN"
+            reasons.append(
+                "%d acknowledged CRIT(s) — rolling forward with eyes open "
+                "(WARN, not PASS)" % len(acked_crits))
+    else:
+        verdict = "PASS" if not base_block else "HOLD"
+
+    gate = args.get("rollout_gate", "pass-only")
+    gate_pass = (verdict == "PASS"
+                 or (verdict == "WARN" and gate == "pass-warn"))
 
     result = {
         "canary": host_id, "verdict": verdict,
@@ -195,11 +369,16 @@ def canary_status(events_path, args):
         "counts": {"CRIT": crit, "WARN": warn, "INFO": info},
         "unexplained_count": len(unexplained),
         "unexplained": unexplained,
+        "acked_crit_count": len(acked_crits),
+        "acked_crits": acked_crits,
         "stale": is_stale,
         "minutes_since_last_event": (round(stale_min, 1)
                                      if stale_min is not None else None),
         "reasons": reasons,
         "acks_loaded": len(acks),
+        "ack_store": store_path,
+        "rollout_gate": gate,
+        "gate_pass": gate_pass,
     }
 
     if args["format"] == "json":
@@ -211,34 +390,136 @@ def canary_status(events_path, args):
               % (observed_days, args["require_days"]))
         print("findings:       %d CRIT  %d WARN  %d INFO  (window)"
               % (crit, warn, info))
-        print("unexplained:    %d  (acked patterns loaded: %d)"
+        print("unexplained:    %d  (acked WARN patterns: %d)"
               % (len(unexplained), len(acks)))
+        if acked_crits:
+            print("acked CRITs:    %d  (eyes-open — see below)"
+                  % len(acked_crits))
         if last_any is not None:
             print("last event:     %.0f min ago%s"
                   % (stale_min, "  <-- STALE" if is_stale else ""))
         else:
             print("last event:     (none)")
         if unexplained:
-            print("--- unexplained WARN/CRIT (review or add to --ack-file) ---")
+            print("--- unexplained / blocking findings (review or ack) ---")
             for u in unexplained[:25]:
-                print("  %-4s seq=%-5s %-28s %s"
-                      % (u["severity"], u["seq"], u["signal"], u["summary"]))
+                hint = ""
+                if u["severity"] == "CRIT":
+                    hint = "  [ack: %s --reason ...]" % u["finding_id"]
+                print("  %-4s seq=%-5s %-28s %s%s"
+                      % (u["severity"], u["seq"], u["signal"],
+                         u["summary"], hint))
             if len(unexplained) > 25:
                 print("  ... and %d more" % (len(unexplained) - 25))
+        if acked_crits:
+            print("--- acknowledged CRITs (eyes open, expire) ---")
+            for c in acked_crits[:25]:
+                print("  CRIT seq=%-5s %-28s by %s: %s"
+                      % (c["seq"], c["signal"], c["ack_signer"],
+                         c["ack_reason"]))
         if verdict == "PASS":
             print("GATE: PASS — canary is clean. Proceed to operator signoff, "
                   "then expand to the next host (PHASE4_CANARY_PLAYBOOK.md §gate).")
+        elif verdict == "WARN":
+            print("GATE: WARN — " + "; ".join(reasons))
+            print("      fleet gate '%s': %s. PASS-only waves HOLD here; "
+                  "pass-warn waves may roll forward (operator's call)."
+                  % (gate, "rolls forward" if gate_pass else "holds"))
         else:
             print("GATE: HOLD — " + "; ".join(reasons))
 
-    return 0 if verdict == "PASS" else 1
+    return {"PASS": 0, "HOLD": 1, "WARN": 3}[verdict]
 
 
-def main(argv):
+def do_ack(argv):
+    """`ack` subcommand — append an audited CRIT acknowledgement."""
+    args = {"finding_id": None, "reason": None, "signer": None,
+            "ttl_hours": DEFAULT_TTL_HOURS, "ack_store": None,
+            "now_epoch": None}
+    i = 0
+    while i < len(argv):
+        try:
+            if argv[i] == "--finding-id":
+                args["finding_id"] = argv[i + 1]; i += 2
+            elif argv[i] == "--reason":
+                args["reason"] = argv[i + 1]; i += 2
+            elif argv[i] == "--signer":
+                args["signer"] = argv[i + 1]; i += 2
+            elif argv[i] == "--ttl-hours":
+                args["ttl_hours"] = int(argv[i + 1]); i += 2
+            elif argv[i] == "--ack-store":
+                args["ack_store"] = argv[i + 1]; i += 2
+            elif argv[i] == "--now-epoch":
+                args["now_epoch"] = float(argv[i + 1]); i += 2
+            elif argv[i] in ("-h", "--help"):
+                sys.stdout.write(__doc__); return 0
+            else:
+                sys.stderr.write(
+                    "canary-status ack: unknown argument %r\n" % argv[i])
+                return 2
+        except (IndexError, ValueError):
+            sys.stderr.write(
+                "canary-status ack: bad value for %s\n" % argv[i]); return 2
+
+    if not args["finding_id"]:
+        sys.stderr.write(
+            "canary-status ack: --finding-id <hash> is required "
+            "(the alert hash from the status output)\n")
+        return 2
+    # Option D: a CRIT ack is only legitimate with a documented reason.
+    if not args["reason"] or not args["reason"].strip():
+        sys.stderr.write(
+            "canary-status ack: --reason \"<text>\" is required — every CRIT "
+            "acknowledgement must carry a documented reason\n")
+        return 2
+
+    signer = (args["signer"]
+              or os.environ.get("ONIONWARDEN_CANARY_SIGNER")
+              or _default_signer())
+    store = (args["ack_store"]
+             or os.environ.get("ONIONWARDEN_CANARY_ACK_STORE")
+             or DEFAULT_ACK_STORE)
+    ts = _iso(_now(args))
+    rec = {"finding_id": args["finding_id"], "alert_hash": args["finding_id"],
+           "ts": ts, "signer": signer, "reason": args["reason"].strip(),
+           "ttl_hours": args["ttl_hours"]}
+
+    d = os.path.dirname(store)
+    if d and not os.path.isdir(d):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as exc:
+            sys.stderr.write(
+                "canary-status ack: cannot create %s: %s\n" % (d, exc))
+            return 2
+    try:
+        with open(store, "a") as fh:
+            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        sys.stderr.write(
+            "canary-status ack: cannot write %s: %s\n" % (store, exc))
+        return 2
+
+    sys.stderr.write(
+        "canary-status: recorded ack for finding %s by %s "
+        "(ttl %sh, expires %s) -> %s\n"
+        % (rec["finding_id"], signer, rec["ttl_hours"],
+           _iso(_parse_ts(ts) + int(args["ttl_hours"]) * 3600), store))
+    return 0
+
+
+def _default_signer():
+    try:
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER") or "unknown"
+
+
+def run_status(a):
     args = {"require_days": 7, "stale_min": 30, "format": "text",
-            "ack_file": None, "since_days": None, "now_epoch": None,
+            "ack_file": None, "ack_store": None, "rollout_gate": "pass-only",
+            "since_days": None, "now_epoch": None,
             "host": None, "events": None, "receiver_root": None}
-    a = argv[1:]
     i = 0
     while i < len(a):
         try:
@@ -254,6 +535,10 @@ def main(argv):
                 args["stale_min"] = int(a[i + 1]); i += 2
             elif a[i] == "--ack-file":
                 args["ack_file"] = a[i + 1]; i += 2
+            elif a[i] == "--ack-store":
+                args["ack_store"] = a[i + 1]; i += 2
+            elif a[i] == "--rollout-gate":
+                args["rollout_gate"] = a[i + 1]; i += 2
             elif a[i] == "--since-days":
                 args["since_days"] = float(a[i + 1]); i += 2
             elif a[i] == "--now-epoch":
@@ -266,10 +551,16 @@ def main(argv):
                 sys.stderr.write("canary-status: unknown argument %r\n" % a[i])
                 return 2
         except (IndexError, ValueError):
-            sys.stderr.write("canary-status: bad value for %s\n" % a[i]); return 2
+            sys.stderr.write("canary-status: bad value for %s\n" % a[i])
+            return 2
 
     if args["format"] not in ("text", "json"):
-        sys.stderr.write("canary-status: --format must be text|json\n"); return 2
+        sys.stderr.write("canary-status: --format must be text|json\n")
+        return 2
+    if args["rollout_gate"] not in ("pass-only", "pass-warn"):
+        sys.stderr.write(
+            "canary-status: --rollout-gate must be pass-only|pass-warn\n")
+        return 2
 
     events_path = args["events"]
     if not events_path:
@@ -282,6 +573,15 @@ def main(argv):
         events_path = os.path.join(root, args["host"], "events.log")
 
     return canary_status(events_path, args)
+
+
+def main(argv):
+    a = argv[1:]
+    if a and a[0] == "ack":
+        return do_ack(a[1:])
+    if a and a[0] == "status":
+        a = a[1:]
+    return run_status(a)
 
 
 if __name__ == "__main__":
