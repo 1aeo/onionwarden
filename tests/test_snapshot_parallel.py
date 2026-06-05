@@ -295,6 +295,22 @@ def _current_files_digest(out_dir):
     return d
 
 
+def _exit_ok(out_dir, current_name):
+    """True iff the check behind `<name>.current` exited 0 (collector succeeded).
+
+    A collector killed by the per-check watchdog (e.g. `find / -xdev` in `suid`
+    blowing past the test's short per-check timeout on a slow build host) exits
+    non-zero AND leaves a *partially written* .current — whatever it managed to
+    emit before SIGTERM. That partial content is inherently nondeterministic
+    (the kill lands at a different byte each run), so it must NOT be treated as
+    an orchestration-determinism signal: the non-zero .exit already flags it."""
+    ef = pathlib.Path(out_dir) / (current_name[: -len(".current")] + ".exit")
+    try:
+        return ef.read_text().strip() == "0"
+    except FileNotFoundError:
+        return False
+
+
 def test_parallel_runs_byte_identical(fake_ssh, pinned_host_state, tmp_path):
     """Two consecutive --parallel 8 runs produce byte-identical .current files
     (the orchestration must not introduce non-determinism in per-check output).
@@ -327,6 +343,15 @@ def test_parallel_runs_byte_identical(fake_ssh, pinned_host_state, tmp_path):
     # (clock prints `ntp_sync na_no_timedatectl`, profile prints constants,
     # etc.). We allow per-check skips only if BOTH sides genuinely differ.
     diffs = sorted(name for name in d1 if d1[name] != d2[name])
+    # Drop checks that FAILED (collector killed by the per-check watchdog) on
+    # either run: their .current is a truncated fragment, not a determinism
+    # signal. On the macOS build host `suid`/`filesystem` run `find /...` walks
+    # that exceed the test's short per-check timeout and are SIGTERM'd (rc=143),
+    # leaving a partial file that differs byte-for-byte between runs. On Linux CI
+    # these complete fast (rc=0) and stay compared. This is orthogonal to the
+    # ALLOWED_VARIABLE allowlist below, which covers checks that SUCCEED but
+    # legitimately vary (wall-clock timestamps, sliding journal windows).
+    diffs = [n for n in diffs if _exit_ok(out1, n) and _exit_ok(out2, n)]
     # Explicit allowlist of collectors whose .current output legitimately
     # varies between back-to-back runs. Each entry names the underlying source
     # of nondeterminism — it must be a property of the *collector's input*,
