@@ -116,14 +116,22 @@ window also validates that pipeline — see `journal/README.md`.
 
 ## Success criteria (the watch window)
 
-The canary must run **≥ 7 days with zero *unexplained* WARN/CRIT alerts.**
+The canary must run **≥ 7 days with zero *unexplained* WARN alerts and zero
+CRIT alerts** to PASS. The verdict has **three states** (Option D):
+
+| verdict | meaning | exit |
+|---------|---------|------|
+| **PASS** | ≥ require-days observed, zero unexplained WARN, not stale, **zero CRIT** | 0 |
+| **HOLD** | any gate unmet, **or a CRIT that is not validly acknowledged** | 1 |
+| **WARN** | would PASS but for a CRIT the operator **acked with a reason** — "rolling forward with eyes open", **never** PASS | 3 |
 
 - *Unexplained* ≠ *zero alerts.* On `alert_push_level=warn` you **expect** some
   WARN noise (clock-not-yet-synced on first boot, snap-revision churn during an
   apt week). Each one you investigate and judge benign becomes an
   **acknowledgement**, not a failure.
-- Record acknowledgements in an ack-file (one pattern per line), which doubles as
-  the seed for the host's `host.conf` allowlist / `disable_checks` tuning:
+- Record **WARN** acknowledgements in an ack-file (one pattern per line), which
+  doubles as the seed for the host's `host.conf` allowlist / `disable_checks`
+  tuning:
 
   ```sh
   # acks/relay-a.acks
@@ -131,36 +139,96 @@ The canary must run **≥ 7 days with zero *unexplained* WARN/CRIT alerts.**
   snap                    # snap auto-refresh revision churn (apt week)
   ```
 
-- Any **CRIT**, or any WARN you cannot explain, **resets the clock** — fix the
-  root cause (real issue) or add the allowlist entry (false positive), then the
-  7-day window restarts from the change.
+- An unexplained **WARN resets the clock** — fix the root cause (real issue) or
+  add the allowlist entry (false positive), then the window restarts.
+- A **CRIT** is different. A pattern in the WARN ack-file does **not** clear a
+  CRIT. A CRIT can only be acknowledged through the audited ack store (next
+  section), and even a valid ack **never promotes the verdict to PASS** — it
+  downgrades HOLD → **WARN**. The intent: a CRIT on the canary is always
+  surfaced in the verdict, even when the operator has consciously decided to
+  roll forward anyway.
+
+### Acknowledging a CRIT (Option D)
+
+A CRIT ack is a deliberate, audited, expiring decision — not a silent suppress.
+Use the `ack` subcommand; `--reason` is **mandatory**:
+
+```sh
+# the status output prints each blocking CRIT's finding-id (the alert hash):
+#   CRIT seq=2 modules/new-module  module nfsd   [ack: a8dabdc6ebe8cebf --reason ...]
+onionwarden canary ack \
+    --finding-id a8dabdc6ebe8cebf \
+    --reason "nfsd is expected on this NFS-backed canary; reviewed w/ infra" \
+    --signer  ops-joey \
+    --ttl-hours 72            # default 72h; the ack expires and HOLD returns
+```
+
+Each ack appends one audit record to **`/var/lib/onionwarden/canary/acks.jsonl`**
+(override with `--ack-store` / `$ONIONWARDEN_CANARY_ACK_STORE`):
+
+```json
+{"finding_id":"a8dabdc6ebe8cebf","alert_hash":"a8dabdc6ebe8cebf",
+ "ts":"2026-05-28T11:00:00Z","signer":"ops-joey",
+ "reason":"nfsd is expected ...","ttl_hours":72}
+```
+
+Ack lifecycle / policy:
+
+- **Reason required.** No `--reason` → the ack is rejected at parse time
+  (exit 2), nothing is written.
+- **Expires.** After `ttl_hours` (default 72), the ack is stale and the CRIT
+  blocks again (HOLD) until re-acked — a forcing function to actually fix it.
+- **No self-acks.** An ack whose `signer` equals the identity that *triggered*
+  the alert (the finding's `host_id`) is recorded for the audit trail but is
+  **never gate-valid** — the alerting host can't clear its own CRIT.
+- The signer comes from `--signer`, else `$ONIONWARDEN_CANARY_SIGNER`, else the
+  local user. Records are append-only; the store is the audit log.
 
 ### Checking the gate
 
-`onionwarden-canary-status` turns the window into one PASS/HOLD verdict. Run it
-on the receiver (authoritative copy) or against the canary's `events.log`:
+`onionwarden-canary-status` turns the window into one verdict. Run it on the
+receiver (authoritative copy) or against the canary's `events.log`:
 
 ```sh
 # on the receiver:
-onionwarden canary-status --host relay-a \
+onionwarden canary status --host relay-a \
     --require-days 7 --ack-file acks/relay-a.acks
 # or against a copied events.log:
-onionwarden canary-status --events relay-a/events.log --ack-file acks/relay-a.acks
+onionwarden canary status --events relay-a/events.log --ack-file acks/relay-a.acks
 ```
 
 ```
 === onionwarden canary status: relay-a ===
-verdict:        PASS
+verdict:        WARN
 observed:       8.0 / 7 clean days required
-findings:       0 CRIT  3 WARN  412 INFO  (window)
-unexplained:    0  (acked patterns loaded: 2)
+findings:       1 CRIT  3 WARN  412 INFO  (window)
+unexplained:    0  (acked WARN patterns: 2)
+acked CRITs:    1  (eyes-open — see below)
 last event:     1 min ago
-GATE: PASS — canary is clean. Proceed to operator signoff...
+--- acknowledged CRITs (eyes open, expire) ---
+  CRIT seq=2 modules/new-module  by ops-joey: nfsd is expected ...
+GATE: WARN — 1 acknowledged CRIT(s) — rolling forward with eyes open (WARN, not PASS)
 ```
 
 PASS requires **all** of: `observed_days ≥ --require-days`, **zero** unexplained
-WARN/CRIT, and the canary **not stale** (still reporting). Exit 0 = PASS, 1 =
-HOLD. It's cron-friendly — wire it to a daily check during the window.
+WARN, the canary **not stale**, and **zero CRIT**. A validly-acked CRIT yields
+WARN instead. Exit codes: `0 = PASS`, `3 = WARN`, `1 = HOLD`, `2 = usage`. It's
+cron-friendly — wire it to a daily check during the window.
+
+### Fleet auto-rollout gate
+
+When the canary verdict feeds an automated fleet rollout, the operator chooses
+**per fleet wave** what counts as "go":
+
+| `--rollout-gate` | rolls forward on | use when |
+|------------------|------------------|----------|
+| `pass-only` (default) | PASS only | conservative; the first/sensitive waves |
+| `pass-warn` | PASS **or** WARN | later waves where an acked-CRIT "eyes-open" roll-forward is an accepted, audited risk |
+
+The flag only sets `gate_pass` (and the printed guidance) — it does **not**
+change the verdict or exit code, so the audit trail of *why* a wave proceeded is
+explicit. Default is conservative: an acked CRIT (WARN) **holds** unless the
+wave was explicitly configured `pass-warn`.
 
 ---
 
@@ -169,7 +237,9 @@ HOLD. It's cron-friendly — wire it to a daily check during the window.
 Do not touch a second host until **every** box is checked:
 
 - [ ] `onionwarden canary-status` reports **PASS** (≥7 clean days, 0 unexplained,
-      not stale).
+      not stale, 0 CRIT). A **WARN** (acked-CRIT, eyes-open) is *not* a clean
+      signoff: only an automated `pass-warn` wave may proceed on WARN, and only
+      with the ack reason captured in this log.
 - [ ] The receiver's `verify-check` shows the canary's self-hash + pubkey-hash
       matching known-good (run `verify-record` once, early, then it self-checks).
 - [ ] `seqcheck` shows no events.log sequence gaps for the canary.
