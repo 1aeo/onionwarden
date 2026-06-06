@@ -1,0 +1,12 @@
+# /etc/systemd/journal-remote.conf.d/10-onionwarden.conf — receiver side (L6).
+# RENDERED by scripts/journal-remote-setup.sh: @CERT_DIR@ substituted; in --http
+# mode the three *File= lines are stripped.
+[Remote]
+# One journal file per source host: /var/log/journal/remote/remote-<host>.journal
+# so the off-box copy is greppable per relay and a flood from one host can't
+# corrupt another's stream.
+SplitMode=host
+Seal=yes
+ServerKeyFile=@CERT_DIR@/remote.key
+ServerCertificateFile=@CERT_DIR@/remote.crt
+TrustedCertificateFile=@CERT_DIR@/ca.crt
