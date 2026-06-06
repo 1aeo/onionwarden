@@ -17,6 +17,7 @@ receiver
   └─ cron (as onionwarden):
        */5  verify-check    → CRIT on selfhash/pubkeyhash mismatch + stale
        */5  seqcheck        → CRIT on per-host seq gaps + WARN once on reset
+       */10 correlate       → CRIT on cross-host fan-out / ip-spray / blackout
        07:00 UTC digest     → daily fleet rollup
        weekly rotate logs   → roots-only, lifts +a → mv → gz → re-arms +a
 ```
@@ -82,6 +83,7 @@ ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden/data
 # ONIONWARDEN_RECEIVER_NTFY=  # set to your ntfy URL when ntfy is configured
 */5 * * * *  onionwarden  /var/lib/onionwarden/data/.bin/onionwarden-receiver verify-check
 */5 * * * *  onionwarden  /var/lib/onionwarden/data/.bin/onionwarden-receiver seqcheck
+*/10 * * * * onionwarden  /var/lib/onionwarden/data/.bin/onionwarden-correlate --quiet
 0 7 * * *    onionwarden  /var/lib/onionwarden/data/.bin/onionwarden-receiver digest
 0 4 * * 0    root         /opt/onionwarden/scripts/rotate-receiver-logs.sh
 EOF
@@ -168,6 +170,37 @@ message unverifiable for the duration of the gap.
    # then on the receiver:
    sudo rm /var/lib/onionwarden/receiver.{priv,pub}.YYYYMMDD-HHMMSS.bak
    ```
+
+### Cross-host correlation (M6)
+
+`onionwarden-correlate` runs from the `*/10` cron line above. Where
+`verify-check`/`seqcheck` ask "is THIS host healthy?", correlate asks "is
+the FLEET under coordinated attack?" — the highest-signal detection across a
+set of near-identical relays (PLAN §4 M6). It reads every host's events.log
+and reports three patterns, each requiring N **distinct** hosts inside one
+time window (single-host noise never clusters):
+
+| pattern  | what it catches |
+|----------|-----------------|
+| fan-out  | the same finding (check+signal+observed) on ≥N hosts — a worm spreading a module, a supply-chain hit flipping the same debsums/AIDE file fleet-wide, a kernel-CVE taint landing on every stock-6.8 relay at once |
+| ip-spray | the same source IP across ≥N hosts' auth findings — one address spraying / brute-forcing the fleet |
+| blackout | ≥N hosts going silent with last-seen times clustered — a coordinated takedown, told apart from one relay flapping by the simultaneity |
+
+Tuning (defaults follow M6's "three within an hour"): `--min-hosts 3`,
+`--window-min 60`, `--since-min 1440`, `--stale-min 30`. `--coarse` drops
+`observed` from the fan-out key (catches "every host got *a* new module"
+even when the names differ — higher recall, lower precision). Run it by hand
+to triage:
+
+```sh
+sudo -u onionwarden /var/lib/onionwarden/data/.bin/onionwarden-correlate \
+    --min-hosts 2 --window-min 30
+```
+
+Exit 2 = at least one cluster (cron mails the report; ntfy push per cluster
+if `ONIONWARDEN_RECEIVER_NTFY` is set). Exit 0 = quiet fleet. Correlation
+uses each event's receiver-stamped `recv_ts`, so a host that lies about its
+clock cannot hide inside or fabricate a window.
 
 ### Rotating the append-only events.log
 

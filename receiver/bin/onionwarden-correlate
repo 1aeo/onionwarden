@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""onionwarden-correlate — receiver-side cross-host alert correlation (PLAN §4 M6).
+
+Runs on the trusted, off-fleet receiver host, alongside `onionwarden-receiver`
+(verify-check / seqcheck / digest). Where those answer "is THIS host healthy?",
+correlate answers "is the FLEET under a coordinated attack?" — the highest-signal
+detection available across a set of near-identical relays (PLAN §4 M6).
+
+It reads every host's append-only events.log and looks for three patterns that a
+per-host view structurally cannot see, each distinguished from single-host noise
+by requiring N distinct hosts inside one time window:
+
+  1. fan-out      the SAME finding (check+signal+observed) on >= N hosts within
+                  the window — a worm spreading a module, a supply-chain hit
+                  flipping the same debsums/AIDE file fleet-wide, a kernel-CVE
+                  taint landing on every stock-6.8 relay at once.
+  2. ip-spray     the SAME source IP in auth findings across >= N hosts within
+                  the window — one address brute-forcing / spraying the fleet.
+  3. blackout     >= N hosts going silent (no fresh event) with their last-seen
+                  times clustered inside the window — a coordinated takedown,
+                  told apart from one relay flapping by the simultaneity.
+
+Correlation uses each event's receiver-stamped `recv_ts` (set by
+receiver-append.sh, not host-forgeable) and falls back to the host `ts`. Host
+counts are always DISTINCT hosts — a host repeating a finding (or the ~1/min
+selfreport) counts once, never inflating a cluster (the core false-positive
+guard).
+
+Subcommand:
+  correlate            scan and report clusters (default if omitted)
+
+Env:
+  ONIONWARDEN_RECEIVER_ROOT  per-host event tree root (default ~/onionwarden)
+  ONIONWARDEN_RECEIVER_NTFY  optional ntfy URL; one push per cluster
+  ONIONWARDEN_NOW_EPOCH      pin "now" (UTC epoch seconds) for deterministic runs
+
+Tuning (all overridable; defaults follow PLAN §4 M6 "three within an hour"):
+  --min-hosts N    distinct hosts required to call a cluster   (default 3)
+  --window-min W   max spread between first/last event in a cluster (default 60)
+  --since-min S    only consider events newer than S minutes   (default 1440)
+  --stale-min T    a host with no event for T minutes is silent (default 30)
+  --coarse         fan-out keys drop `observed` (check+signal only) — catches
+                   "every host reported A new module within the hour" even when
+                   the module names differ; higher recall, lower precision.
+  --format text|json
+  --quiet          suppress the "no clusters" line (for cron)
+
+Exit: 2 if any cluster is found, 0 if none, 1 on usage error.
+
+  # added to /etc/cron.d/onionwarden-receiver (see receiver/RECEIVER.md):
+  */10 * * * *  onionwarden  .../onionwarden-correlate --quiet
+"""
+import calendar
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
+
+ROOT = os.environ.get("ONIONWARDEN_RECEIVER_ROOT",
+                      os.path.join(os.path.expanduser("~"), "onionwarden"))
+
+# IPv4 dotted-quad or a bracket-free IPv6 hextet run. Deliberately loose — we
+# only use matches as correlation KEYS, never to make a trust decision, so a
+# false IP token at worst creates an under-populated (sub-threshold) bucket.
+_IPV4 = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
+_IPV6 = r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b"
+_IP_RE = re.compile("%s|%s" % (_IPV4, _IPV6))
+
+# Checks whose findings carry a meaningful source IP for ip-spray correlation.
+_AUTH_CHECKS = ("auth_log", "ssh", "promisc", "network_deep", "ports")
+
+
+def _now():
+    pinned = os.environ.get("ONIONWARDEN_NOW_EPOCH")
+    if pinned:
+        return float(pinned)
+    return time.time()
+
+
+def host_dirs():
+    if not os.path.isdir(ROOT):
+        return []
+    out = []
+    for name in sorted(os.listdir(ROOT)):
+        d = os.path.join(ROOT, name)
+        if os.path.isdir(d) and not name.startswith(".") and not name.startswith("_"):
+            out.append((name, d))
+    return out
+
+
+def _parse_ts(s):
+    if not s:
+        return None
+    try:
+        return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def read_events(host_dir):
+    """Yield (event_dict, effective_epoch) — effective time prefers the
+    receiver-stamped recv_ts (not host-forgeable) over the host ts."""
+    path = os.path.join(host_dir, "events.log")
+    if not os.path.isfile(path):
+        return
+    with open(path, "r", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = _parse_ts(ev.get("recv_ts")) or _parse_ts(ev.get("ts"))
+            yield ev, t
+
+
+def _ips_in(*strings):
+    found = []
+    for s in strings:
+        if not s:
+            continue
+        for m in _IP_RE.findall(s):
+            # skip obvious version-y dotted strings (e.g. 0.0.0.0 is a bind-all,
+            # not a peer) — keep it simple: drop the unspecified address.
+            if m in ("0.0.0.0", "::"):
+                continue
+            if m not in found:
+                found.append(m)
+    return found
+
+
+def ntfy(title, body):
+    url = os.environ.get("ONIONWARDEN_RECEIVER_NTFY", "")
+    if not url:
+        return
+    try:
+        req = urllib.request.Request(
+            url, data=body.encode(),
+            headers={"Title": title, "Priority": "max", "Tags": "rotating_light"})
+        urllib.request.urlopen(req, timeout=15).read()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write("correlate: ntfy push failed: %s\n" % exc)
+
+
+class Cluster(object):
+    def __init__(self, kind, key, severity, hosts, first_t, last_t, sample):
+        self.kind = kind            # fan-out | ip-spray | blackout
+        self.key = key
+        self.severity = severity    # WARN | CRIT
+        self.hosts = sorted(hosts)
+        self.first_t = first_t
+        self.last_t = last_t
+        self.sample = sample        # human-readable exemplar
+
+    def spread_min(self):
+        if self.first_t is None or self.last_t is None:
+            return 0
+        return (self.last_t - self.first_t) / 60.0
+
+    def as_dict(self):
+        return {"kind": self.kind, "key": self.key, "severity": self.severity,
+                "host_count": len(self.hosts), "hosts": self.hosts,
+                "spread_min": round(self.spread_min(), 1), "sample": self.sample}
+
+    def line(self):
+        return ("%-4s %-8s %d hosts in %.0fm  %s  [%s]"
+                % (self.severity, self.kind, len(self.hosts),
+                   self.spread_min(), self.sample, " ".join(self.hosts)))
+
+
+def _windowed_clusters(buckets, min_hosts, window_s):
+    """buckets: key -> list of (host, epoch, severity, sample). Emit one cluster
+    per key where some window of `window_s` contains events from >= min_hosts
+    DISTINCT hosts.
+
+    A host may repeat a finding before and during an incident. Count it once per
+    candidate window, but do not pin it to its earliest occurrence across the
+    whole lookback or a stale repeat can hide the later coordinated cluster.
+    """
+    out = []
+    for key, items in buckets.items():
+        events = []
+        for host, t, severity, smp in items:
+            if t is None:
+                continue
+            events.append((t, host, severity, smp))
+        events.sort()
+        if len({host for _t, host, _severity, _smp in events}) < min_hosts:
+            continue
+
+        # Sliding window over all occurrences, with distinct-host counts inside
+        # the current window so repeated lines from one host cannot inflate it.
+        host_counts = {}
+        left = 0
+        # Keep the WORST qualifying window, not the first: an earlier, smaller
+        # WARN window must not mask a later 5-host or CRIT window for this key.
+        # Rank candidates by (severity CRIT>WARN, host count, recency).
+        best = None  # (rank_tuple, sev, hosts, first_t, last_t, sample)
+        for right, (t, host, _severity, _smp) in enumerate(events):
+            host_counts[host] = host_counts.get(host, 0) + 1
+            while t - events[left][0] > window_s:
+                old_host = events[left][1]
+                host_counts[old_host] -= 1
+                if host_counts[old_host] == 0:
+                    del host_counts[old_host]
+                left += 1
+
+            if len(host_counts) >= min_hosts:
+                window_events = events[left:right + 1]
+                sev = ("CRIT" if any(severity == "CRIT"
+                                      for _t, _h, severity, _smp in window_events)
+                       else "WARN")
+                sample = window_events[-1][3]
+                first_t, last_t = events[left][0], t
+                hosts = list(host_counts.keys())
+                rank = (1 if sev == "CRIT" else 0, len(hosts), last_t)
+                if best is None or rank > best[0]:
+                    best = (rank, sev, hosts, first_t, last_t, sample)
+        if best is None:
+            continue
+        _, sev, hosts, first_t, last_t, sample = best
+        out.append((key, sev, hosts, first_t, last_t, sample))
+    return out
+
+
+def correlate(min_hosts, window_min, since_min, stale_min, coarse, fmt, quiet):
+    now = _now()
+    window_s = window_min * 60
+    since_cut = now - since_min * 60
+
+    fanout = {}      # (check,signal[,observed]) -> [(host,t,sev,sample)]
+    ipspray = {}     # ip -> [(host,t,sev,sample)]
+    last_seen = {}   # host -> latest epoch (any event)
+
+    for host, hd in host_dirs():
+        for ev, t in read_events(hd):
+            if t is not None:
+                if host not in last_seen or t > last_seen[host]:
+                    last_seen[host] = t
+            if t is not None and t < since_cut:
+                continue
+            if ev.get("kind") != "finding":
+                continue
+            sev = ev.get("severity", "")
+            if sev not in ("WARN", "CRIT"):
+                continue
+            detail = ev.get("detail") or {}
+            check = detail.get("check", "?")
+            signal = detail.get("signal", ev.get("summary", "?"))
+            observed = detail.get("observed", "")
+            summary = ev.get("summary", "") or detail.get("summary", "")
+
+            if coarse:
+                fkey = "%s/%s" % (check, signal)
+                sample = "%s/%s" % (check, signal)
+            else:
+                fkey = "%s/%s/%s" % (check, signal, observed)
+                sample = ("%s/%s %s" % (check, signal, observed)).strip()
+            fanout.setdefault(fkey, []).append((host, t, sev, sample))
+
+            if check in _AUTH_CHECKS:
+                for ip in _ips_in(observed, summary):
+                    ipspray.setdefault(ip, []).append(
+                        (host, t, sev, "%s from %s" % (check, ip)))
+
+    clusters = []
+
+    for key, sev, hosts, first_t, last_t, smp in _windowed_clusters(
+            fanout, min_hosts, window_s):
+        # Use the sample from the qualifying window, not the first ever seen for
+        # this key — a stale repeat outside the cluster must not be surfaced.
+        clusters.append(Cluster("fan-out", key, sev, hosts, first_t, last_t, smp))
+
+    for key, sev, hosts, first_t, last_t, smp in _windowed_clusters(
+            ipspray, min_hosts, window_s):
+        # an IP hitting many hosts is at least WARN; escalate to CRIT either way
+        # it is a coordinated event by definition.
+        clusters.append(Cluster("ip-spray", "ip:" + key, "CRIT", hosts,
+                                 first_t, last_t, "source IP %s on fleet" % key))
+
+    # blackout: hosts silent for > stale_min whose last-seen times cluster.
+    silent = {h: t for h, t in last_seen.items() if (now - t) > stale_min * 60}
+    if len(silent) >= min_hosts:
+        times = sorted(silent.values())
+        # are >= min_hosts of the silences within the window of each other?
+        n = len(times)
+        for i in range(n):
+            j = i
+            while j < n and times[j] - times[i] <= window_s:
+                j += 1
+            if (j - i) >= min_hosts:
+                lo, hi = times[i], times[j - 1]
+                hosts = [h for h, t in silent.items() if lo <= t <= hi]
+                clusters.append(Cluster(
+                    "blackout", "simultaneous-silence", "CRIT", hosts, lo, hi,
+                    "%d hosts went silent together" % len(hosts)))
+                break
+
+    # rank: CRIT before WARN, then by host count desc
+    clusters.sort(key=lambda c: (0 if c.severity == "CRIT" else 1, -len(c.hosts)))
+
+    if fmt == "json":
+        print(json.dumps({"clusters": [c.as_dict() for c in clusters],
+                          "min_hosts": min_hosts, "window_min": window_min},
+                         indent=2))
+    else:
+        if not clusters:
+            if not quiet:
+                print("ok  no cross-host correlation clusters "
+                      "(min_hosts=%d window=%dm)" % (min_hosts, window_min))
+        else:
+            print("=== onionwarden cross-host correlation: %d cluster(s) "
+                  "(min_hosts=%d window=%dm) ===" % (len(clusters), min_hosts,
+                                                     window_min))
+            for c in clusters:
+                print(c.line())
+
+    for c in clusters:
+        ntfy("onionwarden CORRELATION %s: %s" % (c.severity, c.kind),
+             c.line())
+
+    return 2 if clusters else 0
+
+
+def main(argv):
+    args = argv[1:]
+    if args and args[0] == "correlate":
+        args = args[1:]
+    min_hosts, window_min, since_min, stale_min = 3, 60, 1440, 30
+    coarse, fmt, quiet = False, "text", False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        try:
+            if a == "--min-hosts":
+                min_hosts = int(args[i + 1]); i += 2
+            elif a == "--window-min":
+                window_min = int(args[i + 1]); i += 2
+            elif a == "--since-min":
+                since_min = int(args[i + 1]); i += 2
+            elif a == "--stale-min":
+                stale_min = int(args[i + 1]); i += 2
+            elif a == "--format":
+                fmt = args[i + 1]; i += 2
+            elif a == "--coarse":
+                coarse = True; i += 1
+            elif a == "--quiet":
+                quiet = True; i += 1
+            elif a in ("-h", "--help"):
+                sys.stdout.write(__doc__); return 0
+            else:
+                sys.stderr.write("correlate: unknown argument %r\n" % a); return 1
+        except (IndexError, ValueError):
+            sys.stderr.write("correlate: bad value for %s\n" % a); return 1
+    if fmt not in ("text", "json"):
+        sys.stderr.write("correlate: --format must be text|json\n"); return 1
+    if min_hosts < 2:
+        sys.stderr.write("correlate: --min-hosts must be >= 2\n"); return 1
+    if window_min <= 0:
+        sys.stderr.write("correlate: --window-min must be > 0\n"); return 1
+    if since_min <= 0:
+        sys.stderr.write("correlate: --since-min must be > 0\n"); return 1
+    if stale_min <= 0:
+        sys.stderr.write("correlate: --stale-min must be > 0\n"); return 1
+    return correlate(min_hosts, window_min, since_min, stale_min,
+                     coarse, fmt, quiet)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
