@@ -337,8 +337,13 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
 done
 # Close the top-level "run checks" stage (if the loop broke on REFUSE_RUN with a
 # check stage still open, close that first so the stack unwinds cleanly).
-[ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_skip "run refused"
-stage_ok
+if [ "$REFUSE_RUN" = "yes" ]; then
+  [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_skip "run refused"
+  stage_skip "run refused"
+else
+  [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_skip "run refused"
+  stage_ok
+fi
 
 # --- process findings -----------------------------------------------------
 sev_of() { printf '%s' "$1" | sed -n 's/.*"severity":"\([A-Z]*\)".*/\1/p'; }

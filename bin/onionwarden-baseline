@@ -61,6 +61,7 @@ do_collect() {
   # Sub-stages: the profile probe (slot 1) plus one collector per non-profile
   # check (profile.sh is skipped below). That is exactly total_checks sub-stages.
   local total_sub=$total_checks
+  local collect_failed=no
   stage_begin 1 1 "collect baseline"
 
   stage_begin 1 "$total_sub" "detect profile"
@@ -68,6 +69,7 @@ do_collect() {
     stage_ok
   else
     stage_fail "detect-profile exited nonzero"
+    collect_failed=yes
   fi
   export _PROF_FILE="$out/state/profile.state"
 
@@ -84,10 +86,15 @@ do_collect() {
     else
       log_warn "collect: check '$name' failed — state file may be incomplete"
       stage_fail "collector exited nonzero"
+      collect_failed=yes
     fi
   done
 
-  stage_ok   # close "collect baseline"
+  if [ "$collect_failed" = "yes" ]; then
+    stage_fail "one or more collectors failed"
+  else
+    stage_ok
+  fi
   stage_summary
 
   baseline_write_manifest "$out" "$host_id"
