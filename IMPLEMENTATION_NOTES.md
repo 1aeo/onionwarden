@@ -99,8 +99,10 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   `docs/PHASE4_CANARY_PLAYBOOK.md` is the step-by-step runbook (dry-run →
   install → baseline+sign → dead-man self-test → 7-day watch window → signoff
   gate → rollback) and `bin/onionwarden-canary-status` reports the canary's
-  PASS/HOLD verdict against the gate (≥7 clean days, zero unexplained WARN/CRIT,
-  not stale). `examples/answers-canary.example` is rollout-ready. Executing it
+  three-state **PASS/HOLD/WARN** verdict against the gate (Option D: ≥7 clean
+  days, zero unexplained WARN, not stale, and zero CRIT for PASS — an
+  operator-acked CRIT downgrades to WARN, never PASS, via the audited `ack`
+  subcommand). `examples/answers-canary.example` is rollout-ready. Executing it
   on a real host is the remaining operator step.
 - **`apt install debsums aide auditd`** — package installs are real-host
   operations. The checks detect-and-skip when these tools are absent
