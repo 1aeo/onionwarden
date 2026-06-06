@@ -59,11 +59,27 @@ baseline_state_file() {
   if [ -f "$f" ]; then printf '%s' "$f"; fi
 }
 
+baseline_reject_symlinks() {
+  local dir=$1 link status
+  link=$(find "$dir" -type l -print -quit 2>/dev/null)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    log_err "baseline: unable to scan for symlinks in $dir"
+    return 1
+  fi
+  if [ -n "$link" ]; then
+    log_err "baseline: symlink present in signed baseline tree: $link"
+    return 1
+  fi
+  return 0
+}
+
 # baseline_verify DIR PUBKEY — verify signature, every state-file hash, that no
 # UNLISTED state file is present (R1-4), and that the baseline is not an
 # anti-rollback violation (R1-1). Returns 0 only if all hold.
 baseline_verify() {
   local dir=$1 pubkey=$2 manifest="$1/manifest.json"
+  baseline_reject_symlinks "$dir" || return 1
   [ -f "$manifest" ] || { log_err "baseline: manifest missing in $dir"; return 1; }
   if ! onionwarden_verify_artifact "$pubkey" "$manifest"; then
     log_err "baseline: manifest.json signature invalid"
