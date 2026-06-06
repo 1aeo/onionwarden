@@ -88,6 +88,116 @@ def fake_ssh_sleep(tmp_path):
     return str(p)
 
 
+# ---------------------------------------------------------------------------
+# pinned host state (de-flakes the byte-identity test — see PR "de-flake
+# test_parallel_runs_byte_identical")
+# ---------------------------------------------------------------------------
+#
+# The byte-identity test asserts the *orchestration* introduces no
+# non-determinism in per-check output. To isolate orchestration from genuine
+# host churn it must feed the collectors a FIXED snapshot of host state — the
+# same idea as the sibling serial/parallel test pinning now_iso() via
+# ONIONWARDEN_NOW.
+#
+# network_deep is the collector that flaked CI ~30-50% of runs (worse on
+# 24.04 than 22.04). It reads live /proc/net/tcp* (outbound sockets) and
+# `ip neigh` (ARP). On a busy Linux runner BOTH churn between two back-to-back
+# snapshots: a background process opens a connection to a NEW peer, or an ARP
+# entry ages REACHABLE->STALE. The per-row normaliser in network_deep
+# (canonicalise to `outbound <comm> <dst:port>`, dropping ephemeral src_port
+# and transient TCP fine-state) correctly collapses *within-connection* churn,
+# but it cannot collapse a brand-new peer or neighbour appearing mid-snapshot
+# — so network_deep.current diverged between runs and the test failed.
+#
+# Fix: pin network_deep's inputs for this test. ONIONWARDEN_PROC redirects the
+# socket/fd/comm reads at a synthetic /proc fixture; stub `ip`/`nft` on PATH
+# fix the route/iface/arp/nft lines. Production is UNCHANGED — collectors still
+# read live state on real relays, so tamper detection is intact. The collector
+# still runs end-to-end here (normalise + sort + RAW: relocation), so an
+# orchestration race that reordered, duplicated, or truncated rows would STILL
+# fail this test — network_deep stays a *compared* file, not an allowlisted one.
+# /etc/resolv.conf (the `dns` lines) is read by absolute path and is static for
+# the lifetime of a CI job, so it needs no pinning.
+
+# A synthetic /proc/net/tcp: 3 outbound sockets (tor x2, sshd) + 1 LISTEN
+# (no remote — skipped by the collector). Fields mirror the kernel layout:
+#   idx local_address rem_address st tx:rx tr:tm->when retrnsmt uid timeout inode ...
+_FAKE_PROC_NET_TCP = (
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+    "   0: 0100007F:1F90 5B1F8A0A:2329 01 00000000:00000000 00:00000000 00000000  1000        0 5001 1 ffff 100\n"
+    "   1: 0100007F:9C40 4E0C2D0B:0050 06 00000000:00000000 00:00000000 00000000  1000        0 5002 1 ffff 100\n"
+    "   2: 0100007F:0016 0A00020F:E1B2 01 00000000:00000000 00:00000000 00000000     0        0 5003 1 ffff 100\n"
+    "   3: 0100007F:24C2 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1002        0 9999 1 ffff 100\n"
+)
+
+# Per-PID /proc data the network_deep + process_ancestry collectors read.
+#   (pid, comm, cgroup, stat, [(fd, inode), ...])
+_FAKE_PROC_PIDS = [
+    (1000, "tor",        "0::/system.slice/system-tor.slice/tor@0.service\n",
+     "1000 (tor) S 1 1000 1000 0 -1 4194304 0 0 0 0 0 0\n",
+     [(10, 5001), (11, 5002)]),
+    (1001, "sshd",       "0::/system.slice/ssh.service\n",
+     "1001 (sshd) S 1 1001 1001 0 -1 4194304 0 0 0 0 0 0\n",
+     [(4, 5003)]),
+    (1002, "prometheus", "0::/system.slice/prometheus.service\n",
+     "1002 (prometheus) S 1 1002 1002 0 -1 4194304 0 0 0 0 0 0\n",
+     [(7, 5004)]),
+]
+
+# `ip`/`nft` stubs: deterministic output for exactly the subcommands the
+# collectors invoke (network_deep: route/link/neigh + nft; promisc: link).
+# `*)` arms emit nothing and exit 0 so any other invocation stays harmless.
+_FAKE_IP_STUB = r"""#!/usr/bin/env bash
+case "$*" in
+  "route show")    printf 'default via 10.0.2.2 dev eth0\n10.0.2.0/24 dev eth0 proto kernel scope link src 10.0.2.15\n' ;;
+  "-br link show") printf 'lo               UNKNOWN        00:00:00:00:00:00\neth0             UP             52:54:00:12:34:56\n' ;;
+  "neigh show")    printf '10.0.2.2 dev eth0 lladdr 52:54:00:12:35:02 router REACHABLE\n' ;;
+  *)               : ;;
+esac
+"""
+
+_FAKE_NFT_STUB = r"""#!/usr/bin/env bash
+case "$*" in
+  "list ruleset") printf 'table inet filter {\n\tchain input {\n\t\ttype filter hook input priority 0;\n\t}\n}\n' ;;
+  *)              : ;;
+esac
+"""
+
+
+@pytest.fixture
+def pinned_host_state(tmp_path):
+    """Build a fixed /proc tree + `ip`/`nft` stubs and return the env that
+    pins every volatile input network_deep reads. Passed to BOTH parallel runs
+    so any divergence is the orchestration's fault, not the host's."""
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    (proc / "net" / "tcp").write_text(_FAKE_PROC_NET_TCP)
+    # tcp6/udp/udp6 exist but are empty (header-less is fine: the collector
+    # skips short lines). Their presence exercises the multi-file read loop.
+    for f in ("tcp6", "udp", "udp6"):
+        (proc / "net" / f).write_text("")
+    for pid, comm, cgroup, stat_line, fds in _FAKE_PROC_PIDS:
+        d = proc / str(pid)
+        (d / "fd").mkdir(parents=True)
+        (d / "comm").write_text(comm + "\n")
+        (d / "cgroup").write_text(cgroup)
+        (d / "stat").write_text(stat_line)
+        for fd, inode in fds:
+            os.symlink(f"socket:[{inode}]", d / "fd" / str(fd))
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in (("ip", _FAKE_IP_STUB), ("nft", _FAKE_NFT_STUB)):
+        b = bindir / name
+        b.write_text(body)
+        b.chmod(b.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    return {
+        "ONIONWARDEN_PROC": str(proc),
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+    }
+
+
 def _run_snapshot(out_dir, fake_ssh_path, parallel, extra_env=None,
                   single_bundle=False):
     """Drive bin/onionwarden-snapshot end-to-end with the fake-ssh stub."""
@@ -185,24 +295,63 @@ def _current_files_digest(out_dir):
     return d
 
 
-def test_parallel_runs_byte_identical(fake_ssh, tmp_path):
+def _exit_ok(out_dir, current_name):
+    """True iff the check behind `<name>.current` exited 0 (collector succeeded).
+
+    A collector killed by the per-check watchdog (e.g. `find / -xdev` in `suid`
+    blowing past the test's short per-check timeout on a slow build host) exits
+    non-zero AND leaves a *partially written* .current — whatever it managed to
+    emit before SIGTERM. That partial content is inherently nondeterministic
+    (the kill lands at a different byte each run), so it must NOT be treated as
+    an orchestration-determinism signal: the non-zero .exit already flags it."""
+    ef = pathlib.Path(out_dir) / (current_name[: -len(".current")] + ".exit")
+    try:
+        return ef.read_text().strip() == "0"
+    except FileNotFoundError:
+        return False
+
+
+def test_parallel_runs_byte_identical(fake_ssh, pinned_host_state, tmp_path):
     """Two consecutive --parallel 8 runs produce byte-identical .current files
-    (the orchestration must not introduce non-determinism in per-check output)."""
+    (the orchestration must not introduce non-determinism in per-check output).
+
+    `pinned_host_state` redirects network_deep's live-kernel reads (/proc/net
+    sockets, `ip neigh` ARP, nft ruleset) at a FIXED fixture so the test
+    measures orchestration determinism, not host-network quiescence — see the
+    fixture docstring. Production collectors are unchanged."""
     out1 = tmp_path / "snap-a"
     out2 = tmp_path / "snap-b"
-    p1 = _run_snapshot(out1, fake_ssh, 8)
-    p2 = _run_snapshot(out2, fake_ssh, 8)
+    p1 = _run_snapshot(out1, fake_ssh, 8, extra_env=pinned_host_state)
+    p2 = _run_snapshot(out2, fake_ssh, 8, extra_env=pinned_host_state)
     assert p1.returncode in (0, 2)
     assert p2.returncode in (0, 2)
     d1 = _current_files_digest(out1)
     d2 = _current_files_digest(out2)
     # The KEY set must match exactly (same check files written).
     assert set(d1) == set(d2)
+    # network_deep MUST have taken the real collection path (not the macOS
+    # `na no-procnet` short-circuit) — otherwise the pinning is a no-op and the
+    # byte-identity guarantee below is vacuous. Assert the fixture's outbound
+    # peers are present so a regression that breaks ONIONWARDEN_PROC plumbing
+    # is caught here rather than re-surfacing as a CI flake.
+    nd1 = (out1 / "network_deep.current").read_text()
+    assert "outbound tor 10.138.31.91:9001" in nd1, \
+        f"network_deep did not collect from the pinned /proc fixture:\n{nd1}"
+    assert "na no-procnet" not in nd1, nd1
     # And content must match for every check whose collector emits no
     # timestamps. On macOS most collectors that succeed are time-independent
     # (clock prints `ntp_sync na_no_timedatectl`, profile prints constants,
     # etc.). We allow per-check skips only if BOTH sides genuinely differ.
     diffs = sorted(name for name in d1 if d1[name] != d2[name])
+    # Drop checks that FAILED (collector killed by the per-check watchdog) on
+    # either run: their .current is a truncated fragment, not a determinism
+    # signal. On the macOS build host `suid`/`filesystem` run `find /...` walks
+    # that exceed the test's short per-check timeout and are SIGTERM'd (rc=143),
+    # leaving a partial file that differs byte-for-byte between runs. On Linux CI
+    # these complete fast (rc=0) and stay compared. This is orthogonal to the
+    # ALLOWED_VARIABLE allowlist below, which covers checks that SUCCEED but
+    # legitimately vary (wall-clock timestamps, sliding journal windows).
+    diffs = [n for n in diffs if _exit_ok(out1, n) and _exit_ok(out2, n)]
     # Explicit allowlist of collectors whose .current output legitimately
     # varies between back-to-back runs. Each entry names the underlying source
     # of nondeterminism — it must be a property of the *collector's input*,
@@ -211,16 +360,19 @@ def test_parallel_runs_byte_identical(fake_ssh, tmp_path):
     #
     # Cross-platform entries:
     #   profile.current         — records detected_at= wall-clock timestamp.
-    #   process_ancestry.current — walks live /proc on Linux; on macOS the
-    #                             collector short-circuits with a constant
-    #                             marker, so this entry is harmless there
-    #                             and useful for keeping Linux CI from flaking.
-    # network_deep.current is DELIBERATELY NOT in this set — see commit
-    # "network_deep: coarser outbound normalizer". The collector canonicalises
-    # outbound rows to `outbound <comm> <dst:port>` (drops ephemeral src_port
-    # and TCP fine-state) so the file is byte-identical across parallel
-    # snapshot runs even on a busy relay. Forensic 5-tuple detail lives in
-    # raw/network_deep.raw and is NOT subject to byte-identity.
+    #   process_ancestry.current — its `tmpexec` rows come from a live
+    #                             `find /tmp /var/tmp /dev/shm`; temp files
+    #                             churn between runs even with /proc pinned, so
+    #                             this stays variable on Linux. On macOS the
+    #                             /proc walk short-circuits, so it's harmless.
+    # network_deep.current is DELIBERATELY NOT in this set: the `pinned_host_state`
+    # fixture freezes its live inputs (/proc/net sockets, `ip neigh`, nft) so it
+    # is byte-identical by construction AND stays a *compared* file — an
+    # orchestration race that reordered/duplicated/truncated its rows still
+    # fails this test. The per-row normaliser alone is NOT enough: it collapses
+    # src_port/TCP-state churn but not a brand-new outbound peer appearing
+    # mid-snapshot, which is exactly what flaked CI before the fixture existed.
+    # Forensic 5-tuple detail lives in raw/network_deep.raw (NOT compared).
     ALLOWED_VARIABLE = {"profile.current", "process_ancestry.current"}
     # Linux-only entries: these collectors short-circuit on macOS
     # (`na no-systemctl` / `na no-journalctl` / no live /usr,/etc walks),
