@@ -1,0 +1,7 @@
+# /etc/systemd/system/systemd-journal-remote.socket.d/10-onionwarden.conf
+# receiver listen override (L6). RENDERED by scripts/journal-remote-setup.sh:
+# @PORT@ substituted. The first empty ListenStream= CLEARS the package default
+# so the receiver listens on exactly the onionwarden port and nothing else.
+[Socket]
+ListenStream=
+ListenStream=@PORT@

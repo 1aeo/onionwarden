@@ -62,6 +62,18 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   baselines are a hard error (exit 3) unless `--no-strict`; `--fail-on-divergence`
   exits 4 for CI gating. Tested by `tests/test_fleet_diff.py` +
   `tests/bats/test_fleet_diff.bats`.
+- **Off-box journal shipping** (`journal/` + `scripts/journal-{ship,remote}-setup.sh`,
+  Phase 3, L6) — `systemd-journal-upload` on each host streams the journal to the
+  receiver's `systemd-journal-remote` (`SplitMode=host` → one
+  `remote-<host>.journal` per relay), closing the log-vacuum gap (a clean
+  `journalctl --vacuum-time=1s` is now detectable off-box). Ships as committed
+  drop-in templates under `journal/` (persistent-journald snippet, upload + remote
+  conf templates, upload-service hardening, socket listen override) plus two
+  idempotent renderers. mTLS by default; `--http` is a loud lab-only escape
+  hatch. Deliberately NOT wired into `install.sh` (kept out of the Phase-1/2
+  bootstrap and the self-hash set — install.sh's `cp systemd/*` would also break
+  on a subdir); it's a separate post-install operator step (journal/README.md).
+  Tested by `tests/bats/test_journal_shipping.bats`.
 - **install.sh** — lays the tree from a reviewable answers file, pins the
   pubkey hash, stages systemd units, applies `chattr +i` where the FS supports
   it, leaves the host bootstrapping. Tested into a scratch prefix.
@@ -85,7 +97,6 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   deploying but were never run against a real host. The canary rollout
   (`relay-a`) is therefore not executed — `examples/answers-canary.example`
   is rollout-ready.
-- **Off-box journal shipping** (`systemd-journal-upload`, L6) — Phase 3.
 - **`apt install debsums aide auditd`** — package installs are real-host
   operations. The checks detect-and-skip when these tools are absent
   (`packages.sh` falls back `debsums`→`dpkg --verify`; AIDE logs N/A).
