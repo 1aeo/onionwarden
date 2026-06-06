@@ -34,6 +34,21 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   required; off-box-first; cooldown; 7-item first-arm checklist; dry-run.
 - **Suppression** — `onionwarden-suppress`: the maintenance window is an
   Ed25519-signed, time-bounded, replay-guarded token (C5-compliant).
+- **`onionwarden-fleet-diff`** (Phase 3, §6) — operator-side cross-fleet
+  baseline diff. Reads each host's per-host baseline (`state/<check>.state` —
+  either a baseline dir or the receiver's `<host>/baseline/` layout), set-diffs
+  the key indicators (kernel taint, modules, listeners, SUID, sshd) across hosts,
+  groups by role, and emits a Markdown or JSON report surfacing within-role
+  divergences (rarest-first; a minority-presence line is flagged ⚠). It is NOT a
+  convergence tool — a `tor-relay` and an `eval-host` *should* differ; it only
+  surfaces deltas *within* a role. Optional `--pubkey` runs the full
+  `baseline_verify` chain per host (signature + per-state-file hash + unlisted-
+  file refusal) with a per-host isolated anti-rollback marker so verifying N
+  hosts in one process can't cross-contaminate. `--from-receiver TARGET` rsyncs
+  the fleet tree down first (the "pulled over SSH" default). Missing/unverified
+  baselines are a hard error (exit 3) unless `--no-strict`; `--fail-on-divergence`
+  exits 4 for CI gating. Tested by `tests/test_fleet_diff.py` +
+  `tests/bats/test_fleet_diff.bats`.
 - **install.sh** — lays the tree from a reviewable answers file, pins the
   pubkey hash, stages systemd units, applies `chattr +i` where the FS supports
   it, leaves the host bootstrapping. Tested into a scratch prefix.
@@ -45,8 +60,6 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   deploying but were never run against a real host. The canary rollout
   (`relay-a`) is therefore not executed — `examples/answers-canary.example`
   is rollout-ready.
-- **`onionwarden-fleet-diff`** — a documented Phase-3 stub (`bin/onionwarden-fleet-diff`
-  exits 64 with an explanation). Cross-fleet diff is explicitly Phase 3.
 - **Receiver cross-host correlation** (§4 M6) — Phase 3, not built.
 - **Off-box journal shipping** (`systemd-journal-upload`, L6) — Phase 3.
 - **`apt install debsums aide auditd`** — package installs are real-host
