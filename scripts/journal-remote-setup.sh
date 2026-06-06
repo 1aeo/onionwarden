@@ -23,6 +23,7 @@ PORT="19532"
 CERT_DIR="/etc/onionwarden/journal"
 JOURNAL_DIR="/var/log/journal/remote"
 HTTP=0 ROOT="" PRINT=0 ENABLE=0 DRY=0
+SYSTEMCTL=${SYSTEMCTL:-systemctl}
 
 usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -99,15 +100,16 @@ if [ "$HTTP" != 1 ] && [ "$DRY" != 1 ]; then
 fi
 
 if [ "$ENABLE" = 1 ]; then
-  if [ -n "$ROOT" ] && [ "$DRY" != 1 ]; then
+  if [ -n "$ROOT" ] && [ "$DRY" != 1 ] && [ "$SYSTEMCTL" = systemctl ]; then
     say "--enable cannot be combined with --root (would toggle the live host unit"
     say "against on-host config, not the files rendered under $ROOT)"
     exit 1
   fi
-  if command -v systemctl >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
-    systemctl daemon-reload
-    systemctl enable --now systemd-journal-remote.socket
-    say "systemd-journal-remote.socket enabled on port $PORT"
+  if command -v "$SYSTEMCTL" >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
+    "$SYSTEMCTL" daemon-reload
+    "$SYSTEMCTL" enable systemd-journal-remote.socket
+    "$SYSTEMCTL" restart systemd-journal-remote.socket
+    say "systemd-journal-remote.socket enabled and restarted on port $PORT"
   else
     say "skipping systemctl enable (systemctl absent or --dry-run)"
   fi

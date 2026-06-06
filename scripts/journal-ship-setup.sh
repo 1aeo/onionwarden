@@ -28,6 +28,7 @@ TMPL="$SRC_DIR/journal"
 RECEIVER_URL="" RECEIVER_HOST="" PORT="19532"
 CERT_DIR="/etc/onionwarden/journal"
 HTTP=0 ROOT="" PRINT=0 ENABLE=0 DRY=0
+SYSTEMCTL=${SYSTEMCTL:-systemctl}
 
 usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -130,16 +131,17 @@ if [ "$HTTP" != 1 ] && [ "$DRY" != 1 ] && [ "$PRINT" != 1 ]; then
 fi
 
 if [ "$ENABLE" = 1 ]; then
-  if [ -n "$ROOT" ] && [ "$DRY" != 1 ]; then
+  if [ -n "$ROOT" ] && [ "$DRY" != 1 ] && [ "$SYSTEMCTL" = systemctl ]; then
     say "--enable cannot be combined with --root (would restart live host units"
     say "instead of using the files rendered under $ROOT)"
     exit 1
   fi
-  if command -v systemctl >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
-    systemctl daemon-reload
-    systemctl restart systemd-journald
-    systemctl enable --now systemd-journal-upload.service
-    say "systemd-journal-upload enabled"
+  if command -v "$SYSTEMCTL" >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
+    "$SYSTEMCTL" daemon-reload
+    "$SYSTEMCTL" restart systemd-journald
+    "$SYSTEMCTL" enable systemd-journal-upload.service
+    "$SYSTEMCTL" restart systemd-journal-upload.service
+    say "systemd-journal-upload enabled and restarted"
   else
     say "skipping systemctl enable (systemctl absent or --dry-run)"
   fi

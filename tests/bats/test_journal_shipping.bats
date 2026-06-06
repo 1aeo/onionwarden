@@ -20,6 +20,17 @@ fp() {  # fingerprint every file under $1 (path + content), order-stable
       printf '%s\n' "$f"; cat "$f"; done )
 }
 
+stub_systemctl() {
+  mkdir -p "$ROOT/bin"
+  cat > "$ROOT/bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+SH
+  chmod +x "$ROOT/bin/systemctl"
+  export SYSTEMCTL="$ROOT/bin/systemctl"
+  export SYSTEMCTL_LOG="$ROOT/systemctl.calls"
+}
+
 # --- relay: rendering ------------------------------------------------------
 
 @test "relay --print renders all three drop-ins with the receiver URL" {
@@ -87,6 +98,15 @@ fp() {  # fingerprint every file under $1 (path + content), order-stable
     "$ROOT/etc/systemd/journal-upload.conf.d/10-onionwarden.conf"
 }
 
+@test "relay --enable restarts journal-upload so changed drop-ins take effect" {
+  stub_systemctl
+  run "$SHIP" --root "$ROOT" --receiver-host recv.example.net --enable
+  [ "$status" -eq 0 ]
+  calls=$(< "$SYSTEMCTL_LOG")
+  expected=$'daemon-reload\nrestart systemd-journald\nenable systemd-journal-upload.service\nrestart systemd-journal-upload.service'
+  [ "$calls" = "$expected" ]
+}
+
 # --- receiver: rendering ---------------------------------------------------
 
 @test "receiver --print renders remote.conf + socket listen drop-in with port" {
@@ -110,6 +130,15 @@ fp() {  # fingerprint every file under $1 (path + content), order-stable
   run "$REMOTE" --http --print
   [ "$status" -eq 0 ]
   [[ "$output" != *"ServerKeyFile="* ]]
+}
+
+@test "receiver --enable restarts the socket so changed ports take effect" {
+  stub_systemctl
+  run "$REMOTE" --root "$ROOT" --port 28000 --enable
+  [ "$status" -eq 0 ]
+  calls=$(< "$SYSTEMCTL_LOG")
+  expected=$'daemon-reload\nenable systemd-journal-remote.socket\nrestart systemd-journal-remote.socket'
+  [ "$calls" = "$expected" ]
 }
 
 # --- receiver: idempotency -------------------------------------------------
