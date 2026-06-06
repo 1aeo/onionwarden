@@ -56,8 +56,12 @@ the off-box receiver, including install, key rotation, and host migration.
 | 1 | quick-win watchdog: 11 highest-value checks + timers + heartbeat + alerting |
 | 2 | SSH hardening + full check coverage + kill-switch infrastructure |
 | 3 | snapshot-bundle (offline scan) + fleet diff |
-| 4 | dry-run + canary rollout (`relay_a` first, `alert_push_level=warn`) |
+| 4 | dry-run + canary rollout (`relay_a` first, `alert_push_level=warn`) — see [`docs/PHASE4_CANARY_PLAYBOOK.md`](docs/PHASE4_CANARY_PLAYBOOK.md) |
 | 5 | fleet-wide rollout |
+
+Phase 4 is an operator runbook, not new collector code: [`docs/PHASE4_CANARY_PLAYBOOK.md`](docs/PHASE4_CANARY_PLAYBOOK.md)
+covers deploy → 7-day watch window → signoff gate → rollback, and
+`onionwarden canary-status` reports the canary's PASS/HOLD verdict against the gate.
 
 ## Quickstart
 

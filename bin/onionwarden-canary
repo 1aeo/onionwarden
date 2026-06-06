@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# bin/onionwarden-canary — thin alias so the canary tool reads naturally as a
+# verb-noun command (PHASE4_CANARY_PLAYBOOK.md). It forwards every argument to
+# onionwarden-canary-status, which dispatches its own subcommands:
+#
+#   onionwarden-canary status --host relay-a ...        # rollout verdict (default)
+#   onionwarden-canary ack --finding-id <hash> --reason "<text>"   # audited CRIT ack
+#
+# `status` is optional — bare flags still mean "status" for backward compat.
+set -euo pipefail
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+exec "$_bin_dir/onionwarden-canary-status" "$@"
