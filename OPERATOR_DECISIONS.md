@@ -70,7 +70,13 @@ IPMI/live-USB) and (b) whether `chattr +i` works (FS-dependent — `install.sh`
 probes this automatically and degrades gracefully).
 **Risk:** HIGH for *process*, low for *code*. The code detect-and-skips, so it
 will not break — but the **Phase-0 offline scan cannot be planned** without this
-inventory. Inventory all 8 relays before Phase 0.
+inventory. Inventory all relays before Phase 0.
+**Tooling:** `bin/onionwarden-virt-inventory` now produces the per-host
+VM/bare-metal/container verdict + DMI + cgroup/namespace state as JSON. Run it
+across the fleet with the paste-block in [`docs/virt-inventory.md`](docs/virt-inventory.md)
+(`ssh <host> 'bash -s' < bin/onionwarden-virt-inventory`), then record each
+verdict here / in Appendix A. **Still operator-run** — this build ships the tool,
+not the captured inventory.
 
 ## §7 — Offline-scan cadence
 **Default:** **quarterly** (not monthly).
