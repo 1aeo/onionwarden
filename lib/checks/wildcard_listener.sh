@@ -94,11 +94,26 @@ _wl_load_allow() {
 }
 
 wildcard_listener_analyze() {
-  # $1 is the baseline state (unused — this check is absolute, not a diff).
-  local cur_file=$2
+  local base_file=$1 cur_file=$2
 
   if grep -q '^na ' "$cur_file" 2>/dev/null; then
     emit_na "$CHECK_NAME" wildcard_bind "ss not available"
+    return 0
+  fi
+
+  # Anchor to a trusted baseline, like every other check: assert wildcard binds
+  # only once a baseline has been *captured* for this check. A real captured
+  # baseline always has a `wildcard_listener.state` (onionwarden-baseline writes
+  # one per check, even empty), so this gate is satisfied on every deployed host
+  # — the check then runs ABSOLUTELY against the allowlist (it does NOT diff the
+  # baseline, so a wildcard that was already present when the baseline was taken
+  # is still CRIT). The gate only suppresses on a host with no established
+  # baseline (the dispatcher passes /dev/null), where it would otherwise be
+  # asserting against an untrusted/unknown world — exactly the
+  # bootstrapping/nobaseline state where the dispatcher already withholds alerts.
+  if [ "$base_file" = "/dev/null" ] || [ ! -e "$base_file" ]; then
+    emit_na "$CHECK_NAME" wildcard_bind \
+      "no baseline captured for this check yet — inactive until a baseline exists"
     return 0
   fi
 

@@ -9,9 +9,13 @@ did not flag (ports.sh's bind-IP expectation check is opt-in).
 analyze() is a pure function of (current state, allowlist file). The allowlist
 path is injected via $ONIONWARDEN_WILDCARD_ALLOW so these run on any OS.
 """
+import json
 import os
+import subprocess
 
-from conftest import run_analyze
+from conftest import ROOT, BASH, run_analyze
+
+CHECK = ROOT / "lib" / "checks" / "wildcard_listener.sh"
 
 GENERIC = 'host_id="t"\nrole="generic"\n'
 
@@ -116,3 +120,22 @@ def test_inline_comment_on_allowlist_entry(tmp_path):
     # A SECURITY justification may sit inline after the entry.
     allow = ["bgpd:179:tcp   # SECURITY: reviewed 2026-06-06, mgmt VRF only"]
     assert _binds(_run([BGPD], allow_lines=allow, tmp_path=tmp_path)) == []
+
+
+def test_no_baseline_is_inactive(tmp_path):
+    # Anchored to a trusted baseline like every other check: with no baseline
+    # captured for this check (the dispatcher passes /dev/null), it must NOT
+    # assert — it emits NA, never a CRIT. This is what keeps a trusted clean
+    # run clean on a host that happens to have wildcard listeners but whose
+    # minimal/absent baseline has no wildcard_listener.state.
+    cur = tmp_path / "cur"
+    cur.write_text(BGPD + "\n")
+    p = subprocess.run(
+        [BASH, str(CHECK), "analyze", "--baseline", "/dev/null",
+         "--current", str(cur)],
+        capture_output=True, text=True,
+        env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
+             "ONIONWARDEN_WILDCARD_ALLOW": str(tmp_path / "none.allow")})
+    assert p.returncode == 0, p.stderr
+    sevs = [json.loads(l)["severity"] for l in p.stdout.splitlines() if l.strip()]
+    assert sevs == ["NA"]                      # NA only, no CRIT

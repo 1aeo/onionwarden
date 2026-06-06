@@ -19,6 +19,21 @@ fires when the operator has declared an `expected_listen_binding_<port>_<proto>`
 for that exact port. No declaration → no check. This check inverts the default:
 **a wildcard bind is CRIT unless explicitly allowlisted.**
 
+## When it runs
+
+Like every other check, this one asserts only against a **trusted, captured
+baseline**. `onionwarden-baseline collect` writes a `wildcard_listener.state`
+for the host (one per check, even when empty), so the check is active on every
+deployed host. Until a baseline exists (bootstrapping / `nobaseline`, or a host
+that has never been baselined) it emits `NA` and never a CRIT — matching the
+dispatcher, which withholds alerts in those states anyway.
+
+It does **not** diff the baseline: a wildcard bind that was already present when
+the baseline was captured is still CRIT (this is the whole point — `ports.sh`'s
+opt-in `listener_binding` is what let a pre-existing `bgpd:0.0.0.0:179` slip
+through). The baseline is only an "is this a trusted host" gate; the verdict is
+absolute against the **allowlist**.
+
 ## Finding payload
 
 Each finding carries (in `observed`): `proto`, `port`, `comm`, `pid`, `user`,
