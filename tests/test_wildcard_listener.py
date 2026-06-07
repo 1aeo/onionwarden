@@ -152,6 +152,40 @@ def test_collect_parses_comm_without_quote(tmp_path):
     assert {r[6] for r in rows} == {"0.0.0.0", "[::]"}, p.stdout
 
 
+def test_dualstack_is_one_finding(tmp_path):
+    # A dual-stack daemon listening on BOTH 0.0.0.0:179 and [::]:179 is one
+    # process+port -> exactly ONE CRIT, with both binds joined (the allowlist
+    # key comm:port:proto is bind-agnostic, so a second alert is pure noise).
+    dual = [
+        "wildcard tcp 179 bgpd 1234 frr 0.0.0.0 /usr/lib/frr/bgpd",
+        "wildcard tcp 179 bgpd 1234 frr [::] /usr/lib/frr/bgpd",
+    ]
+    f = _binds(_run(dual, tmp_path=tmp_path))
+    assert len(f) == 1, f
+    bind = f[0]["observed"].split("bind=")[1].split()[0]
+    assert bind == "0.0.0.0,[::]"
+    # and the allowlist still suppresses the whole process+port in one entry
+    assert _binds(_run(dual, allow_lines=["bgpd:179:tcp"], tmp_path=tmp_path)) == []
+
+
+def test_ss_unavailable_emits_na(tmp_path):
+    # collect() emits `na no-ss` when ss is missing; analyze() must turn that
+    # into a single NA finding, never a CRIT (PR objective item 5).
+    cur = tmp_path / "cur"
+    cur.write_text("na no-ss\n")
+    p = subprocess.run(
+        [BASH, str(CHECK), "analyze", "--baseline", "/dev/null",
+         "--current", str(cur)],
+        capture_output=True, text=True,
+        env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
+             "ONIONWARDEN_WILDCARD_ALLOW": str(tmp_path / "none.allow")})
+    assert p.returncode == 0, p.stderr
+    findings = [json.loads(line)
+                for line in p.stdout.splitlines() if line.strip()]
+    assert [f["severity"] for f in findings] == ["NA"]
+    assert any("ss not available" in f.get("summary", "") for f in findings)
+
+
 def test_no_baseline_is_inactive(tmp_path):
     # Anchored to a trusted baseline like every other check: with no baseline
     # captured for this check (the dispatcher passes /dev/null), it must NOT

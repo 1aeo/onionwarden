@@ -125,16 +125,41 @@ wildcard_listener_analyze() {
   allow_file="${ONIONWARDEN_WILDCARD_ALLOW:-$WILDCARD_ALLOW_DEFAULT}"
   allow=$(_wl_load_allow "$allow_file")
 
+  # Aggregate per (proto, port, comm, pid) so a single dual-stack daemon
+  # listening on BOTH 0.0.0.0:$port and [::]:$port is ONE finding, not two —
+  # the allowlist key (comm:port:proto) is bind-agnostic, so the second socket
+  # is pure duplicate HOLD/ack noise. The binds are joined into one field. Done
+  # in awk (bash 3.2 on the build host has no associative arrays). The wildcard
+  # predicate is re-applied here too (defence in depth: a specific-IP line like
+  # 1.2.3.4:179 is dropped, never aggregated, even though collect() pre-filters).
+  local agg
+  agg=$(awk '
+    $1=="wildcard" {
+      bind=$7
+      if (bind!="0.0.0.0" && bind!="*" && bind!="::" && bind!="[::]" && bind!="")
+        next
+      proto=$2; port=$3; comm=$4; pid=$5; user=$6
+      exe=$8; for (i=9; i<=NF; i++) exe=exe" "$i
+      k=proto SUBSEP port SUBSEP comm SUBSEP pid
+      if (!(k in seen)) {
+        seen[k]=1; order[++n]=k
+        P[k]=proto; T[k]=port; C[k]=comm; D[k]=pid; U[k]=user; E[k]=exe
+        B[k]=bind
+      } else {
+        B[k]=B[k]","bind
+      }
+    }
+    END { for (i=1;i<=n;i++){ k=order[i]
+            print P[k], T[k], C[k], D[k], U[k], B[k], E[k] } }
+  ' "$cur_file")
+  [ -n "$agg" ] || return 0
+
   local line proto port comm pid user bind exe key hint
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    case "$line" in 'wildcard '*) ;; *) continue ;; esac
-    # fields: wildcard PROTO PORT COMM PID USER BIND EXE  (exe = remainder)
-    read -r _ proto port comm pid user bind exe <<< "$line"
-    # Defence in depth: only wildcard binds are findings. collect() already
-    # filters to these, but re-checking keeps a specific-IP line (1.2.3.4:179)
-    # from ever being flagged and makes analyze() self-contained.
-    _wl_is_wildcard "$bind" || continue
+    # fields: PROTO PORT COMM PID USER BIND EXE  (BIND may be a joined list,
+    # e.g. 0.0.0.0,[::]; exe = remainder)
+    read -r proto port comm pid user bind exe <<< "$line"
     key="$comm:$port:$proto"
     if [ -n "$allow" ] && printf '%s\n' "$allow" | grep -Fxq "$key"; then
       continue                          # operator-permitted wildcard bind
@@ -145,11 +170,11 @@ wildcard_listener_analyze() {
       *)          hint="$hint (e.g. a \`-l <ip>\` / \`bind <ip>\` daemon option)" ;;
     esac
     emit_finding "$CHECK_NAME" wildcard_bind "CRIT" \
-      "$comm (pid $pid, user $user) listens on wildcard $bind:$port/$proto — $hint" \
+      "$comm (pid $pid, user $user) listens on wildcard $bind for :$port/$proto — $hint" \
       "no wildcard binds permitted (allowlist $allow_file: $comm:$port:$proto)" \
       "proto=$proto port=$port comm=$comm pid=$pid user=$user bind=$bind exe=$exe" \
       false
-  done < "$cur_file"
+  done <<< "$agg"
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0:-}" ]; then

@@ -19,6 +19,14 @@ fires when the operator has declared an `expected_listen_binding_<port>_<proto>`
 for that exact port. No declaration → no check. This check inverts the default:
 **a wildcard bind is CRIT unless explicitly allowlisted.**
 
+> **Triage note — expected overlap with `ports.sh`.** A newly appeared wildcard
+> listener can raise **two** CRITs at once: a `listening_ports` finding from
+> `ports.sh` (new-listener / `listener_binding`) *and* a `wildcard_bind` finding
+> from this check. That is intentional — they enforce different policies
+> (baseline-diff + opt-in bind expectation vs. opt-out wildcard ban). Treat them
+> as one incident; remediating the bind (or allowlisting it here) clears the
+> `wildcard_bind` finding, and re-baselining clears the `listening_ports` one.
+
 ## When it runs
 
 Like every other check, this one asserts only against a **trusted, captured
@@ -41,6 +49,15 @@ the `bind` address (`0.0.0.0` / `*` / `[::]` / `::`), and the binary path (`exe`
 `readlink /proc/<pid>/exe`). The `summary` adds a one-line remediation hint
 (FRR bgpd gets an FRR-specific hint).
 
+A daemon that listens on **both** `0.0.0.0:<port>` and `[::]:<port>` (dual-stack)
+is reported as a **single** finding per `process+port`, with the binds joined in
+the `bind` field (e.g. `bind=0.0.0.0,[::]`) — one alert, not two.
+
+`comm` is the kernel process name (`/proc/<pid>/comm`, as surfaced by `ss`) and
+is **truncated to 15 characters**. Allowlist entries must use that exact
+(possibly truncated) value — a full binary name that exceeds 15 chars will never
+match and the listener will keep firing CRIT.
+
 ## Allowlist
 
 Some daemons legitimately have to bind a wildcard (e.g. an SSH server you
@@ -62,7 +79,8 @@ intend to reach from anywhere). Grant those **explicitly**:
 
 - **All three fields must match exactly.** Proto specificity matters: an entry
   for `sshd:22:tcp` does **not** permit a UDP bind on the same port — that stays
-  CRIT.
+  CRIT. The `<comm>` is the **15-char-truncated** kernel process name (see
+  above) — use the value shown in the finding's `comm`, not the full binary name.
 - Lines starting with `#` are comments. A `#` later on a line is an inline
   comment (everything after it is dropped) — so a SECURITY justification can sit
   on the same line as the entry.
