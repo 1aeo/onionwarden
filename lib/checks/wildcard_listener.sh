@@ -84,7 +84,7 @@ wildcard_listener_collect() {
 # line. Strips `#`-comments (full-line and inline), trims, and keeps only lines
 # that are exactly three non-empty colon-separated fields.
 _wl_load_allow() {
-  local file=$1 raw key c p pr
+  local file=$1 raw c p pr extra
   [ -f "$file" ] || return 0
   while IFS= read -r raw || [ -n "$raw" ]; do
     raw=${raw%%#*}                      # drop comment (full-line or inline)
