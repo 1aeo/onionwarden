@@ -11,9 +11,9 @@ should bind a specific interface/IP so a port is offered only to the network the
 operator intends. A wildcard bind silently exposes the service on every network
 the host is attached to.
 
-This check exists because the **BGP audit** found FRR `bgpd` listening on
-`0.0.0.0:179` on three hosts — **relay-host-3, relay-host-5, relay-host-6** — and
-onionwarden did **not** catch it. The pre-existing bind-IP check in
+This check exists because a **BGP audit** found FRR `bgpd` listening on
+`0.0.0.0:179` on several relay hosts that onionwarden did **not** catch.
+The pre-existing bind-IP check in
 [`ports.sh`](../lib/checks/ports.sh) (`listener_binding`) is *opt-in*: it only
 fires when the operator has declared an `expected_listen_binding_<port>_<proto>`
 for that exact port. No declaration → no check. This check inverts the default:

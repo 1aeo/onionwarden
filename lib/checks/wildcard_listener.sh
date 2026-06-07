@@ -4,9 +4,9 @@
 #
 # Premise: on these relay-fleet hosts *nothing* should listen on a wildcard
 # address — every daemon should bind a specific interface/IP. A wildcard bind
-# offers the port to every network the host is attached to. The BGP audit found
-# FRR `bgpd` listening on `0.0.0.0:179` on three hosts (relay-host-3, relay-host-5,
-# relay-host-6) that onionwarden did not catch, because `ports.sh`'s bind-IP
+# offers the port to every network the host is attached to. A BGP audit found
+# FRR `bgpd` listening on `0.0.0.0:179` on several relay hosts that onionwarden
+# did not catch, because `ports.sh`'s bind-IP
 # expectation check is opt-in (it only fires when the operator has *declared* an
 # `expected_listen_binding_<port>_<proto>` for that port). This check inverts
 # that default: a wildcard bind is CRIT *unless* the operator has explicitly
