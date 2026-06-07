@@ -38,8 +38,8 @@ def _run(current, allow_lines=None, allow_path=None, tmp_path=None):
         f.write_text("\n".join(allow_lines) + "\n")
         env["ONIONWARDEN_WILDCARD_ALLOW"] = str(f)
     else:                                            # no allowlist at all
-        env["ONIONWARDEN_WILDCARD_ALLOW"] = str(
-            (tmp_path or "/nonexistent") and (tmp_path / "missing.allow"))
+        missing = (tmp_path / "missing.allow") if tmp_path else "/nonexistent.allow"
+        env["ONIONWARDEN_WILDCARD_ALLOW"] = str(missing)
     return run_analyze("wildcard_listener", [], current, GENERIC, env=env)
 
 
@@ -122,6 +122,36 @@ def test_inline_comment_on_allowlist_entry(tmp_path):
     assert _binds(_run([BGPD], allow_lines=allow, tmp_path=tmp_path)) == []
 
 
+def test_collect_parses_comm_without_quote(tmp_path):
+    # Regression for the comm off-by-one: collect() must extract `bgpd`, not
+    # `"bgpd`, from ss's `users:(("bgpd",pid=...))` — otherwise the allowlist
+    # key (comm:port:proto) never matches. Inject a fake `ss` on PATH so this
+    # runs on any OS (the unit tests above feed pre-built state lines and so
+    # never exercised the awk extraction that produced this bug).
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ss = fake_bin / "ss"
+    ss.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'tcp LISTEN 0 4096 0.0.0.0:179 0.0.0.0:* '
+        'users:(("bgpd",pid=1234,fd=21))\\n\'\n'
+        'printf \'tcp LISTEN 0 128 [::]:22 [::]:* '
+        'users:(("sshd",pid=700,fd=3))\\n\'\n')
+    ss.chmod(0o755)
+    p = subprocess.run(
+        [BASH, str(CHECK), "collect"],
+        capture_output=True, text=True,
+        env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
+             "PATH": f"{fake_bin}:{os.environ['PATH']}"})
+    assert p.returncode == 0, p.stderr
+    rows = [ln.split() for ln in p.stdout.splitlines()
+            if ln.startswith("wildcard")]
+    comms = {r[3] for r in rows}              # field 4 = comm
+    assert comms == {"bgpd", "sshd"}, p.stdout   # no leading-quote corruption
+    # bind addresses preserved verbatim (v4 and v6 wildcard forms)
+    assert {r[6] for r in rows} == {"0.0.0.0", "[::]"}, p.stdout
+
+
 def test_no_baseline_is_inactive(tmp_path):
     # Anchored to a trusted baseline like every other check: with no baseline
     # captured for this check (the dispatcher passes /dev/null), it must NOT
@@ -137,5 +167,6 @@ def test_no_baseline_is_inactive(tmp_path):
         env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
              "ONIONWARDEN_WILDCARD_ALLOW": str(tmp_path / "none.allow")})
     assert p.returncode == 0, p.stderr
-    sevs = [json.loads(l)["severity"] for l in p.stdout.splitlines() if l.strip()]
+    sevs = [json.loads(line)["severity"]
+            for line in p.stdout.splitlines() if line.strip()]
     assert sevs == ["NA"]                      # NA only, no CRIT

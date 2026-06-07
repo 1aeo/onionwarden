@@ -60,7 +60,11 @@ wildcard_listener_collect() {
       addr=substr(local, 1, length(local)-length(port)-1)
       if (addr=="") addr="*"
       comm="-"; pid="-"
-      if (match(rest, /users:\(\("[^"]+"/)) comm=substr(rest, RSTART+8, RLENGTH-8-1)
+      # match is `users:(("<comm>"` — 9 chars of `users:(("` + comm + closing
+      # `"`. Start the comm one past the opening quote (RSTART+9) and drop both
+      # quotes from the length (RLENGTH-10), else comm keeps a leading `"` and
+      # the allowlist key (comm:port:proto) never matches.
+      if (match(rest, /users:\(\("[^"]+"/)) comm=substr(rest, RSTART+9, RLENGTH-10)
       if (match(rest, /pid=[0-9]+/))        pid=substr(rest, RSTART+4, RLENGTH-4)
       print proto, addr, port, comm, pid
     }' | sort -u | while read -r proto addr port comm pid; do

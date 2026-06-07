@@ -1,7 +1,7 @@
 # `wildcard_listener` check — no process should bind a wildcard address
 
 `lib/checks/wildcard_listener.sh` flags **any** process listening on a wildcard
-address — `0.0.0.0`, `*`, or `[::]` — as a **CRIT** finding, one alert per
+address — `0.0.0.0`, `*`, `[::]`, or bare `::` — as a **CRIT** finding, one alert per
 offending `process + port`.
 
 ## Why
@@ -37,7 +37,7 @@ absolute against the **allowlist**.
 ## Finding payload
 
 Each finding carries (in `observed`): `proto`, `port`, `comm`, `pid`, `user`,
-the `bind` address (`0.0.0.0` / `[::]`), and the binary path (`exe`, from
+the `bind` address (`0.0.0.0` / `*` / `[::]` / `::`), and the binary path (`exe`, from
 `readlink /proc/<pid>/exe`). The `summary` adds a one-line remediation hint
 (FRR bgpd gets an FRR-specific hint).
 
