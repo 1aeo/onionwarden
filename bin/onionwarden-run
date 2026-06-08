@@ -385,6 +385,10 @@ printf '{"type":"run_summary","ts":"%s","run_id":"%s","host_id":"%s","cadence":"
 # --- snapshot mode: offline inventory, no alerting/fatal/heartbeat ---------
 if [ "$SNAPSHOT_MODE" = "yes" ]; then
   cp "$FINDINGS" "$FROM_SNAPSHOT/findings.ndjson" 2>/dev/null || true
+  # Emit the run summary on early-exit paths too (CodeRabbit) — otherwise
+  # --from-snapshot prints per-stage lines but never the final recap that the
+  # main path emits below.
+  stage_summary
   log_info "onionwarden-run --from-snapshot complete: $FINDING_COUNT finding(s), $CHECKS_RAN checks analysed (offline inventory, no alerts)"
   exit 0
 fi
@@ -398,6 +402,7 @@ if [ "${ONIONWARDEN_DRYRUN:-0}" = "1" ]; then
       cp "$FINDINGS" "$ONIONWARDEN_DRYRUN_FINDINGS"
     fi
   fi
+  stage_summary
   log_info "onionwarden-run $CADENCE dry-run complete — no heartbeat/alerts/fatal action"
   exit 0
 fi
