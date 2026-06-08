@@ -102,10 +102,37 @@ onionwarden baseline collect
 Per-host config lives in `host.conf` (generated from the answers file by
 `install.sh`); fleet-wide overrides go in `.env`. Neither is committed.
 
+## Stage output
+
+Long-running commands (`onionwarden-run`, `onionwarden-baseline collect`) emit a
+hierarchical, greppable progress stream on **stderr** — the fleet-wide
+convention shared with `onionleak` and `onionarmor` ([`lib/stage_tracker.sh`](lib/stage_tracker.sh)):
+
+```text
+[onionwarden] [<grandparent>] <parent>, n/N. <stage> : <status>
+```
+
+* Every line starts with the literal prefix `[onionwarden]` followed by a
+  space — grep the whole run with `grep -E '^\[onionwarden\] '`.
+* `n/N name` is the stage marker (1-based index out of the total at that level).
+* A stage's **immediate parent** is comma-joined; any **grandparent** is bracketed.
+* `: <status>` is `ok (0.2s)`, `skipped: <reason>`, or `failed: <reason>`.
+
+```text
+[onionwarden] 1/1 run checks (fast), 1/24 check accounts : ok (0.0s)
+[onionwarden] 1/1 run checks (fast), 9/24 check kernel_state : skipped: cadence slow != fast
+[onionwarden] 1/1 collect baseline, 22/24 collect suid : ok (0.3s)
+```
+
+Nesting propagates across processes via the `ONIONWARDEN_STAGE_PARENT` env var,
+so a child process's stages render underneath the parent's hierarchy. Set
+`ONIONWARDEN_STAGES=0` to suppress the stream.
+
 ## Tests
 
 ```sh
 python3 -m pytest tests/ -q       # 154 tests; collector + receiver + crypto
+bats tests/bats/                  # shell regression tests (incl. stage output)
 ```
 
 CI runs the same suite on every push to `main` and every PR
