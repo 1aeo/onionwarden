@@ -272,6 +272,7 @@ done
 stage_begin 1 1 "run checks ($CADENCE)"
 CHECKS_RAN=0
 CHECK_IDX=0
+CHECK_FAILURES=0
 for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
   [ "$REFUSE_RUN" = "yes" ] && break
   [ -f "$cf" ] || continue
@@ -319,6 +320,7 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
     printf '{"type":"check_status","ts":"%s","run_id":"%s","check":"%s","status":"collect_failed"}\n' \
       "$(now_iso)" "$RUN_ID" "$name" >> "$LOG_FILE"
     stage_fail "collect failed or timed out"
+    CHECK_FAILURES=$(( CHECK_FAILURES + 1 ))
     continue
   fi
 
@@ -341,6 +343,7 @@ for cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
   else
     dispatch_synth "check_${name}" WARN "check '$name' analyze failed or timed out" "ran" "failed"
     stage_fail "analyze failed or timed out"
+    CHECK_FAILURES=$(( CHECK_FAILURES + 1 ))
   fi
 done
 # Close the top-level "run checks" stage (if the loop broke on REFUSE_RUN with a
@@ -348,6 +351,9 @@ done
 if [ "$REFUSE_RUN" = "yes" ]; then
   [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_skip "run refused"
   stage_skip "run refused"
+elif [ "$CHECK_FAILURES" -gt 0 ]; then
+  [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_fail "$CHECK_FAILURES check(s) failed"
+  stage_fail "$CHECK_FAILURES check(s) failed"
 else
   [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_ok
   stage_ok

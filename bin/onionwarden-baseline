@@ -80,6 +80,7 @@ do_collect() {
     # missing profile MUST NOT be carried forward into a signed manifest — once
     # signed, future runs would trust those gaps as the baseline (Cursor Bugbot
     # "fail-open regression"). Refuse to proceed; no manifest is written.
+    stage_fail "detect-profile failed"
     stage_summary || true
     die "baseline: detect-profile failed — refusing to write a baseline manifest"
   fi
