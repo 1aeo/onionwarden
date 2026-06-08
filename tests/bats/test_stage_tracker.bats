@@ -90,7 +90,10 @@ teardown() {
 # --- quiet mode -----------------------------------------------------------
 
 @test "quiet mode: ONIONWARDEN_STAGES=0 suppresses every stage line" {
-  run bash -c "ONIONWARDEN_STAGES=0; export ONIONWARDEN_STAGES; . '$TRACKER'; stage_begin 1 1 'x'; stage_ok; stage_log 'hi'"
+  # stage_summary is included so any future regression that leaks the summary
+  # line through quiet mode is caught (CodeRabbit). stage_ok populates
+  # _STAGE_SUMMARY, then stage_summary must produce no output.
+  run bash -c "ONIONWARDEN_STAGES=0; export ONIONWARDEN_STAGES; . '$TRACKER'; stage_begin 1 1 'x'; stage_ok; stage_log 'hi'; stage_summary"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }

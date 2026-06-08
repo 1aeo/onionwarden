@@ -259,8 +259,16 @@ fi
 # Top-level watchdog stage: the per-check collect/analyze loop. Each check is
 # a nested sub-stage so the operator sees "[onionwarden] N/M run checks,
 # i/T check <name> : <status>" — the hierarchical convention (lib/stage_tracker.sh).
-TOTAL_CHECKS=$(ls "$ONIONWARDEN_ROOT"/lib/checks/*.sh 2>/dev/null | wc -l | tr -d ' ')
-[ -n "$TOTAL_CHECKS" ] || TOTAL_CHECKS=0
+# Count check files via a bash loop, not `ls … | wc -l`. Under `set -euo
+# pipefail` an `ls` over an empty glob exits non-zero and the pipefail can
+# abort the dispatcher before the `[ -f "$cf" ]` fallback in the loop below
+# can salvage it (CodeRabbit). The loop is `[ -f ]`-guarded so a literal,
+# unexpanded glob does not get counted.
+TOTAL_CHECKS=0
+for _cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
+  [ -f "$_cf" ] || continue
+  TOTAL_CHECKS=$(( TOTAL_CHECKS + 1 ))
+done
 stage_begin 1 1 "run checks ($CADENCE)"
 CHECKS_RAN=0
 CHECK_IDX=0

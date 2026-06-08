@@ -214,8 +214,10 @@ stage_log() {
 }
 
 stage_summary() {
-  # Print the accumulated one-line run summary (always, even when ONIONWARDEN_
-  # STAGES=0 would suppress per-stage lines — it is the "what happened" line).
+  # Honour quiet mode: ONIONWARDEN_STAGES=0 suppresses ALL stage output,
+  # including this summary line (CodeRabbit — previously the summary leaked
+  # through, breaking the documented quiet-mode contract).
+  [ "${ONIONWARDEN_STAGES:-1}" = "0" ] && return 0
   [ -n "$_STAGE_SUMMARY" ] || return 0
   _stage_chain
   local chain; chain="$(_stage_render)"

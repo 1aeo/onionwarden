@@ -109,11 +109,11 @@ hierarchical, greppable progress stream on **stderr** — the fleet-wide
 convention shared with `onionleak` and `onionarmor` ([`lib/stage_tracker.sh`](lib/stage_tracker.sh)):
 
 ```text
-[onionwarden] <tool> [<grandparent>] <parent>, n/N. <stage> : <status>
+[onionwarden] [<grandparent>] <parent>, n/N. <stage> : <status>
 ```
 
-* Every line starts with `[onionwarden] ` (grep the whole run with
-  `grep '^\[onionwarden\] '`).
+* Every line starts with the literal prefix `[onionwarden]` followed by a
+  space — grep the whole run with `grep -E '^\[onionwarden\] '`.
 * `n/N name` is the stage marker (1-based index out of the total at that level).
 * A stage's **immediate parent** is comma-joined; any **grandparent** is bracketed.
 * `: <status>` is `ok (0.2s)`, `skipped: <reason>`, or `failed: <reason>`.

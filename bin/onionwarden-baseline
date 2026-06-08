@@ -55,12 +55,18 @@ do_collect() {
   # parent; the profile probe, each per-check collector, and the manifest write
   # are nested sub-stages. stage_begin exports ONIONWARDEN_STAGE_PARENT so the
   # detect-profile child process renders underneath this parent automatically.
-  local total_checks idx
-  total_checks=$(ls "$ONIONWARDEN_ROOT"/lib/checks/*.sh 2>/dev/null | wc -l | tr -d ' ')
-  [ -n "$total_checks" ] || total_checks=0
-  # Sub-stages: the profile probe (slot 1) plus one collector per non-profile
-  # check (profile.sh is skipped below). That is exactly total_checks sub-stages.
-  local total_sub=$total_checks
+  local non_profile_checks=0 idx _cf
+  # Count non-profile checks via a bash loop (not `ls | wc -l`: that aborts the
+  # script under set -euo pipefail when the glob doesn't match — CodeRabbit).
+  # Then total sub-stages = detect-profile (slot 1) + one per non-profile check,
+  # which is exact whether or not profile.sh is present (the previous
+  # `total_sub=total_checks` was off-by-one when profile.sh was absent).
+  for _cf in "$ONIONWARDEN_ROOT"/lib/checks/*.sh; do
+    [ -f "$_cf" ] || continue
+    [ "$(basename "$_cf" .sh)" = "profile" ] && continue
+    non_profile_checks=$(( non_profile_checks + 1 ))
+  done
+  local total_sub=$(( non_profile_checks + 1 ))
   local collect_failed=no
   stage_begin 1 1 "collect baseline"
 
@@ -69,7 +75,13 @@ do_collect() {
     stage_ok
   else
     stage_fail "detect-profile exited nonzero"
-    collect_failed=yes
+    # Fail closed: profile.state is the signed trust anchor for host-capability
+    # drift (lib/checks/profile.sh) and gates prof_bool checks. A degraded or
+    # missing profile MUST NOT be carried forward into a signed manifest — once
+    # signed, future runs would trust those gaps as the baseline (Cursor Bugbot
+    # "fail-open regression"). Refuse to proceed; no manifest is written.
+    stage_summary || true
+    die "baseline: detect-profile failed — refusing to write a baseline manifest"
   fi
   export _PROF_FILE="$out/state/profile.state"
 
