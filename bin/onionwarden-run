@@ -341,7 +341,7 @@ if [ "$REFUSE_RUN" = "yes" ]; then
   [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_skip "run refused"
   stage_skip "run refused"
 else
-  [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_skip "run refused"
+  [ "${#_STAGE_NAMES[@]}" -gt 1 ] && stage_ok
   stage_ok
 fi
 
