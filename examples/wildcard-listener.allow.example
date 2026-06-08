@@ -1,0 +1,19 @@
+# /etc/onionwarden/wildcard-listener.allow — explicit exceptions to the
+# "no process may listen on a wildcard address" rule (lib/checks/wildcard_listener.sh).
+#
+# Format: one exception per line, exactly  <comm>:<port>:<proto>
+#   - all three fields must match exactly (proto specificity matters)
+#   - lines starting with '#' are comments; a '#' later on a line is inline
+#   - blank lines and malformed lines are ignored
+#
+# The shipped default is EMPTY: nothing is permitted until you add it. Every
+# entry MUST carry a SECURITY justification — a wildcard bind exposes the
+# service on every network this host is attached to.
+#
+# Examples (commented out — uncomment only what YOU intend to expose):
+#
+# SECURITY: management SSH reachable fleet-wide by policy (reviewed 2026-06-06, jdoe).
+#sshd:22:tcp
+#
+# SECURITY: <who reviewed, why it must be wildcard, when>
+#<comm>:<port>:<proto>
