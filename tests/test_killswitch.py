@@ -115,9 +115,16 @@ def test_fatal_status_reports_disarmed(kstree):
 
 
 # --- suppression workflow -------------------------------------------------
-def _suppress(kstree, *args, **kw):
+def _suppress(kstree, *args, now=None, **kw):
+    """Run onionwarden-suppress. `now` pins the wall clock for this single
+    invocation via ONIONWARDEN_NOW (common.sh:now_iso honors it) so tests can
+    impose a deterministic ordering on the 1-second-resolution timestamps the
+    tool stamps (opened_at, the suppress_last revocation marker)."""
+    env = kstree["env"]
+    if now is not None:
+        env = {**env, "ONIONWARDEN_NOW": now}
     return subprocess.run([BASH, str(ROOT / "bin" / "onionwarden-suppress"), *args],
-                          capture_output=True, text=True, env=kstree["env"], **kw)
+                          capture_output=True, text=True, env=env, **kw)
 
 
 def test_suppress_request_install_activates(kstree):
@@ -154,14 +161,28 @@ def test_suppress_rejects_expired_token(kstree):
 
 
 def test_suppress_clear_revokes_token(kstree):
-    """R4-2: after `clear`, re-installing the same captured token is refused."""
+    """R4-2: after `clear`, re-installing the same captured token is refused.
+
+    `clear` revokes by stamping state/suppress_last with the current time; the
+    anti-replay guard then rejects any token whose opened_at is strictly older
+    than that stamp. Both are 1-second-resolution ISO-8601 timestamps, so when
+    `request` and `clear` execute within the SAME wall-clock second (common on a
+    fast CI runner — this flaked on ubuntu-24.04) opened_at == suppress_last and
+    the guard reads them as "same token re-honored", not a revoked replay, so the
+    re-install is wrongly allowed and the test fails. Pin the clock so request is
+    deterministically EARLIER than clear, eliminating the race. expires_at is
+    still computed from the real clock by `request` (it neutralizes
+    ONIONWARDEN_NOW for that one date call), so the window is genuinely unexpired
+    at install time and the refusal below is the REVOCATION guard, not expiry."""
     _write_conf(kstree)
     tok = kstree["dir"] / "tok"
+    opened_at = "2024-01-01T00:00:00Z"
+    cleared_at = "2024-01-01T00:30:00Z"   # strictly after opened_at
     _suppress(kstree, "request", "--reason", "visit", "--duration", "60m",
-              "--out", str(tok))
+              "--out", str(tok), now=opened_at)
     sign_file(kstree["priv"], str(tok))
     assert _suppress(kstree, "install", "--token", str(tok)).returncode == 0
-    assert _suppress(kstree, "clear").returncode == 0
+    assert _suppress(kstree, "clear", now=cleared_at).returncode == 0
     # the token file is still valid + unexpired, but clear revoked it
     r = _suppress(kstree, "install", "--token", str(tok))
     assert r.returncode != 0
