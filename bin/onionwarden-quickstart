@@ -62,8 +62,15 @@ captured=$(find "$snap" -maxdepth 1 -name '*.current' 2>/dev/null | wc -l | tr -
 printf '  -> analysing offline against an empty baseline (everything is "new") ... %s checks captured\n\n' "$captured"
 
 # Keep every write inside the temp dir so this needs no root and no /var paths.
-ONIONWARDEN_LOG_DIR="$work/log" ONIONWARDEN_STATE_DIR="$work/state" \
-  "$_bin_dir/onionwarden" run --from-snapshot "$snap" >/dev/null 2>&1 || true
+if ! ONIONWARDEN_LOG_DIR="$work/log" ONIONWARDEN_STATE_DIR="$work/state" \
+  "$_bin_dir/onionwarden" run --from-snapshot "$snap"; then
+  {
+    printf '\nonionwarden-quickstart: analysis failed.\n'
+    printf '  The snapshot was captured successfully, but running checks offline failed.\n'
+    printf '  Check the output above for errors (missing dependencies, lock contention, etc).\n'
+  } >&2
+  exit 1
+fi
 
 findings="$snap/findings.ndjson"
 crit=0; warn=0; info=0

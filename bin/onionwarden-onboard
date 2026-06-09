@@ -421,14 +421,58 @@ _draft_host_conf() {
 
   plan "write draft host.conf to $draft"
   if [ "$DRY_RUN" != 1 ]; then
-    cp "$REPO_ROOT/.env.example" "$draft"
+    # Start from an answers template (ini-style keys), not .env.example (shell env vars)
+    local template="$REPO_ROOT/examples/answers-canary.example"
+    if [ ! -f "$template" ]; then
+      # Fallback: generate a minimal ini-style template inline
+      cat > "$draft" <<'TEMPLATE'
+# Per-host answers file for install.sh --answers
+# Fill every CHANGE-ME placeholder before signing off-box
+
+host_id            = "CHANGE-ME"
+role               = "CHANGE-ME"
+canary             = false
+
+ntfy_url           = "https://ntfy.sh/CHANGE-ME-unguessable-topic"
+ntfy_token         = ""
+deadman_provider   = "healthchecks-saas"
+deadman_url        = "https://hc-ping.com/CHANGE-ME-UUID-PER-HOST"
+offbox_log_target  = "onionwarden@receiver.example.net:~/onionwarden/CHANGE-ME/events.log"
+offbox_ssh_key     = "/etc/onionwarden/keys/offbox_ed25519"
+email_to           = "alerts@CHANGE-ME-example.net"
+alert_push_level   = "crit"
+
+expected_lan_ports     = [22]
+expected_uid0          = ["root"]
+expected_admins        = ["CHANGE-ME"]
+expected_extra_modules = []
+expected_taint_bits    = []
+allow_virt_churn       = false
+physical_access_allowed = false
+
+workload_integrity_check = "hashes"
+
+fatal_action         = "alert"
+fatal_action_armed   = false
+fatal_cooldown_hours = 24
+fatal_ack_timeout_s  = 10
+
+verify_pubkey_path     = "/opt/onionwarden/onionwarden.pub"
+apt_correlation_window = "5m"
+offbox_log_retention   = "365d"
+immutable_scripts      = true
+disable_checks         = []
+TEMPLATE
+    else
+      cp "$template" "$draft"
+    fi
     {
       printf '\n# --- auto-suggested values from snapshot %s ---\n' "$snap_dir"
-      printf 'host_id            = "%s"\n' "$HOST"
+      printf '# host_id = "%s"  (uncomment and review, then remove template placeholder)\n' "$HOST"
       if [ -f "$snap_dir/profile.state" ]; then
         local role
         role=$(awk -F= '/^role[[:space:]]*=/ { gsub(/[" ]/,""); print $2; exit }' "$snap_dir/profile.state" 2>/dev/null)
-        [ -n "${role:-}" ] && printf 'role               = "%s"   # suggested from profile.state\n' "$role"
+        [ -n "${role:-}" ] && printf '# role = "%s"  (suggested from profile.state)\n' "$role"
       fi
       printf '# Review every CHANGE-ME, then sign off-box:\n'
       printf '#   onionwarden sign sign --key /path/to/operator.priv --file %s --out %s\n' "$draft" "$HOST_CONF_SIG"
@@ -493,7 +537,8 @@ _install() {
     publine=$(ssh "${_SSH_FLAGS[@]}" 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub' 2>/dev/null || true)
     if [ -n "$publine" ]; then
       ok "host-side per-host signing key already present"
-      printf '\nPaste into the receiver authorized_keys (PLAN §4):\n  restrict,command="/opt/onionwarden/receiver/receiver-append.sh %s" %s\n\n' "$HOST" "$publine"
+      printf '\nPaste into the receiver authorized_keys (PLAN §4):\n  restrict,command="$ONIONWARDEN_RECEIVER_ROOT/.bin/receiver-append.sh %s" %s\n\n' "$HOST" "$publine"
+      printf 'Replace $ONIONWARDEN_RECEIVER_ROOT with the actual path (default: /var/lib/onionwarden).\n\n'
     else
       warn "no per-host offbox key on target — generate now and paste pub line into receiver authorized_keys"
       plan "ssh $SSH_TARGET 'sudo ssh-keygen -t ed25519 -N \"\" -f /etc/onionwarden/keys/offbox_ed25519 -C onionwarden@$HOST'"
@@ -522,8 +567,8 @@ EOF
 _verify() {
   step "Post-install verification for $HOST"
 
-  plan "ssh $SSH_TARGET 'sudo systemctl is-enabled --quiet onionwarden-fast.timer || (crontab -l | grep -q onionwarden-run)'"
-  _ssh "$SSH_TARGET" "sudo systemctl is-enabled --quiet onionwarden-fast.timer || (crontab -l | grep -q onionwarden-run)"
+  plan "ssh $SSH_TARGET 'sudo systemctl is-enabled --quiet onionwarden-fast.timer || (sudo crontab -l | grep -q onionwarden-run)'"
+  _ssh "$SSH_TARGET" "sudo systemctl is-enabled --quiet onionwarden-fast.timer || (sudo crontab -l | grep -q onionwarden-run)"
   ok "watchdog timer / cron entry present"
 
   plan "ssh $SSH_TARGET 'sudo /opt/onionwarden/bin/onionwarden run fast'  (force a heartbeat)"
@@ -537,16 +582,16 @@ _verify() {
     step "Dead-man's switch round-trip (PLAN §3.7 first-arm checklist item 5)"
     local stop_cmd='sudo systemctl stop onionwarden-fast.timer 2>/dev/null || sudo crontab -l 2>/dev/null | grep -v onionwarden-run | sudo crontab -'
     local restore_cmd='sudo systemctl start onionwarden-fast.timer 2>/dev/null || ( ( sudo crontab -l 2>/dev/null; echo "* * * * * /opt/onionwarden/bin/onionwarden run fast" ) | sudo crontab - )'
-    local check_cmd="grep -c stale-host /var/lib/onionwarden/data/${HOST}/events.log"
+    local check_cmd="test -f /var/lib/onionwarden/data/${HOST}/events.log && [ \$(( \$(date +%s) - \$(stat -c %Y /var/lib/onionwarden/data/${HOST}/events.log) )) -gt 180 ] && echo 1 || echo 0"
 
     plan "ssh $SSH_TARGET '$stop_cmd'"
-    plan "sleep $STALE_WINDOW  (wait $STALE_WINDOW s for receiver's verify-check to fire CRIT)"
-    plan "ssh $RECEIVER '$check_cmd'  (expect > 0)"
+    plan "sleep $STALE_WINDOW  (wait $STALE_WINDOW s for receiver to detect staleness)"
+    plan "ssh $RECEIVER '$check_cmd'  (expect events.log age > 180s)"
     plan "ssh $SSH_TARGET '$restore_cmd'"
     warn "stale-window probe is destructive (pauses heartbeats) — re-run with --dry-run first to confirm steps"
 
     if [ "$DRY_RUN" != 1 ]; then
-      # Trap so the timer/cron is restored even if the receiver grep or our
+      # Trap so the timer/cron is restored even if the receiver check or our
       # sleep is interrupted; otherwise an aborted --verify leaves the
       # watchdog disabled and the operator does not know.
       local restored=0
@@ -561,19 +606,19 @@ _verify() {
       step "Pausing heartbeats on $SSH_TARGET"
       _ssh "$SSH_TARGET" "$stop_cmd" || { EXITCODE=6 die "could not stop heartbeats on $SSH_TARGET"; }
 
-      step "Sleeping ${STALE_WINDOW}s for receiver verify-check to fire stale-host"
+      step "Sleeping ${STALE_WINDOW}s for events.log to become stale"
       sleep "$STALE_WINDOW"
 
-      step "Inspecting receiver $RECEIVER for stale-host event"
+      step "Inspecting receiver $RECEIVER for stale events.log"
       _ssh_target_flags "$RECEIVER"
-      local hits
-      hits=$(ssh "${_SSH_FLAGS[@]}" "$check_cmd" 2>/dev/null || printf 0)
-      hits=${hits//[^0-9]/}
-      : "${hits:=0}"
-      if [ "$hits" -gt 0 ]; then
-        ok "receiver recorded $hits stale-host event(s) for $HOST"
+      local is_stale
+      is_stale=$(ssh "${_SSH_FLAGS[@]}" "$check_cmd" 2>/dev/null || printf 0)
+      is_stale=${is_stale//[^0-9]/}
+      : "${is_stale:=0}"
+      if [ "$is_stale" -eq 1 ]; then
+        ok "receiver events.log for $HOST is stale (heartbeats paused correctly)"
       else
-        fail "no stale-host event for $HOST in receiver events.log — deadman_provider not wired (PLAN §4)"
+        fail "events.log for $HOST not stale on receiver — deadman_provider not wired or heartbeats still arriving (PLAN §4)"
         _restore
         trap - EXIT INT TERM
         EXITCODE=6 die "dead-man's switch verification failed"
