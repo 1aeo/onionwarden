@@ -48,8 +48,9 @@ Component reference, the full check inventory, and the rollout phases:
 
 ## Quick start (5 minutes)
 
-You need three things: a trusted **laptop**, one off-fleet **receiver** host,
-and one **monitored** host (Ubuntu 24.04 / Debian 13).
+You need three things: a trusted **laptop** (with `git`, `python3`, and SSH),
+one off-fleet **receiver** host, and one **monitored** host (Ubuntu 24.04 /
+Debian 13, SSH-reachable with key auth).
 
 ### 1. See it work — read-only, no install
 
