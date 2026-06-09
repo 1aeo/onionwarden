@@ -125,7 +125,8 @@ def host_stale_minutes(host_dir, default):
     path = os.path.join(host_dir, ".stale_minutes")
     if os.path.isfile(path):
         try:
-            return int(open(path).read().strip())
+            with open(path) as f:
+                return int(f.read().strip())
         except (OSError, ValueError):
             pass
     return default
