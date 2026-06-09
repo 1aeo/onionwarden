@@ -48,14 +48,19 @@ snap="$work/snapshot"
 
 printf 'onionwarden quickstart · read-only first watch of %s\n' "$HOST"
 printf '  -> snapshotting (read-only; nothing is written on the target) ...\n'
-if ! "$_bin_dir/onionwarden" snapshot "$HOST" --out "$snap" ${PASS[@]+"${PASS[@]}"}; then
+"$_bin_dir/onionwarden" snapshot "$HOST" --out "$snap" ${PASS[@]+"${PASS[@]}"}
+snap_rc=$?
+if [ "$snap_rc" != 0 ] && [ "$snap_rc" != 2 ]; then
   {
-    printf '\nonionwarden-quickstart: snapshot failed.\n'
+    printf '\nonionwarden-quickstart: snapshot failed (exit %s).\n' "$snap_rc"
     printf '  Most likely SSH cannot reach %s non-interactively. Try:\n' "$HOST"
     printf '    ssh %s true\n' "$HOST"
     printf '  and load your key (ssh-add) or fix ~/.ssh/config, then re-run.\n'
   } >&2
   exit 1
+fi
+if [ "$snap_rc" = 2 ]; then
+  printf '  -> snapshot completed with partial data (some collectors failed; continuing with offline analysis) ...\n'
 fi
 
 captured=$(find "$snap" -maxdepth 1 -name '*.current' 2>/dev/null | wc -l | tr -d ' ')
