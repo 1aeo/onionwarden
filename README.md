@@ -1,14 +1,24 @@
 # onionwarden
 
-**Tamper-detection watchdog for Ubuntu 24.04 / Debian 13 fleets.**
+**A tamper-detection watchdog for small Ubuntu 24.04 / Debian 13 fleets.**
 
-Runs a set of local integrity checks on every monitored host, ships findings to
-an off-box receiver over a forced-command SSH key, and pages an oncall via ntfy
-+ a dead-man's-switch when something changes (or stops reporting). Designed for
-small, identity-critical fleets — Tor relays, exit nodes, BGP peers, eval
-hosts — where silent tampering is worse than an outage.
+onionwarden runs ~25 read-only integrity checks on each host, ships what it
+finds to a separate off-box receiver, and pages you the moment something
+changes — or a host goes quiet. It is built for small, identity-critical fleets
+(Tor relays, exit nodes, BGP peers, eval hosts) where *silent* tampering is
+worse than an outage.
 
-## Architecture
+- **Nothing on the box is trusted.** Baselines are signed on your laptop; the
+  on-host collector can only verify and report, never authorize.
+- **Silence is an alert.** A host that stops reporting pages you exactly like
+  one that has been tampered with (dead-man's switch).
+- **No daemons, no PPAs, no pip.** Pure-bash collector; standard-library Python
+  receiver.
+
+**New here?** Run the [5-minute first watch](#quick-start-5-minutes) below — it
+shows you what onionwarden reports on a host without installing anything.
+
+## How it works
 
 ```
 ┌──────────────────┐                ┌───────────────────────┐
@@ -23,84 +33,107 @@ hosts — where silent tampering is worse than an outage.
        operator                          operator
 ```
 
-- **collector** — a tiny pure-bash watchdog (`/opt/onionwarden`) driven by
-  three systemd timers (`fast`, `slow`, `daily`). Runs ~25 checks: kernel
-  taint, loaded modules, listening sockets, sshd config, accounts/sudoers,
-  ld.so.preload, scheduled units, SUID/cap deltas, deep network state,
-  nested-VM layer, snap revisions, hardware, process ancestry, package
-  integrity (debsums/AIDE), promiscuous interfaces, input-device hotplug,
-  local-console login, and more.
-- **signed baseline** — every host has a per-host baseline (`onionwarden
-  baseline collect`) signed off-box with the fleet Ed25519 key; collectors
-  verify the signature on every run (`lib/verify.sh`).
-- **receiver** — receives events over a forced-command SSH key
-  (`receiver/onionwarden-receiver`), appends per-host to an append-only
-  `events.log`, runs cron-based `verify-check` / `seqcheck` / `digest`, and
-  pushes to ntfy on WARN/CRIT. The receiver itself runs `onionwarden`.
-- **kill-switch** — `lib/fatal.sh` evaluates compound conditions and can
-  trigger `alert`, `poweroff`, or `freeze` (deterministic ruleset replace).
-  Ships disarmed; arm per host with `onionwarden arm-fatal` after rollout.
+- **Collector** — a pure-bash watchdog on each monitored host, run by three
+  systemd timers. Runs the checks, verifies the signed baseline, heartbeats,
+  and routes alerts off-box.
+- **Receiver** — a separate off-fleet host that ingests events over a
+  locked-down SSH key, keeps an append-only `events.log` per host, and pushes to
+  ntfy on WARN/CRIT. Not a daemon — just sshd + cron.
+- **Kill-switch** *(optional, ships disarmed)* — can escalate from alert to
+  `freeze` / `poweroff` on compound conditions. Armed per host, only after a
+  host is proven stable.
 
-See [`PLAN.md`](PLAN.md) for the full design, threat model, and phase
-breakdown (~104 KB; it's the spec). [`IMPLEMENTATION_NOTES.md`](IMPLEMENTATION_NOTES.md)
-captures build-time decisions. [`OPERATOR_DECISIONS.md`](OPERATOR_DECISIONS.md)
-records the configurable knobs and their fleet defaults.
-[`receiver/RECEIVER.md`](receiver/RECEIVER.md) is the operator runbook for
-the off-box receiver, including install, key rotation, and host migration.
+Component reference, the full check inventory, and the rollout phases:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Phases
+## Quick start (5 minutes)
 
-| Phase | Goal |
-|-------|------|
-| 0 | bootstrap — generate signing key, stand up receiver, capture initial baselines |
-| 1 | quick-win watchdog: 11 highest-value checks + timers + heartbeat + alerting |
-| 2 | SSH hardening + full check coverage + kill-switch infrastructure |
-| 3 | snapshot-bundle (offline scan) + fleet diff |
-| 4 | dry-run + canary rollout (`relay_a` first, `alert_push_level=warn`) — see [`docs/PHASE4_CANARY_PLAYBOOK.md`](docs/PHASE4_CANARY_PLAYBOOK.md) |
-| 5 | fleet-wide rollout |
+You need three things: a trusted **laptop**, one off-fleet **receiver** host,
+and one **monitored** host (Ubuntu 24.04 / Debian 13).
 
-Phase 4 is an operator runbook, not new collector code: [`docs/PHASE4_CANARY_PLAYBOOK.md`](docs/PHASE4_CANARY_PLAYBOOK.md)
-covers deploy → 7-day watch window → signoff gate → rollback, and
-`onionwarden canary-status` reports the canary's PASS/HOLD verdict against the gate.
+### 1. See it work — read-only, no install
 
-## Quickstart
+On your laptop:
 
 ```sh
-# 1. fork this repo, then on a trusted laptop:
-git clone git@github.com:<you>/onionwarden.git && cd onionwarden
-cp .env.example .env                       # fill in receiver host, ntfy, etc.
-
-# 2. generate the fleet signing keypair (once, store priv offline):
-python3 lib/ed25519.py keygen onionwarden.priv onionwarden.pub
-
-# 3. stand up the receiver (on a separate, off-fleet box).
-#    Full operator runbook in receiver/RECEIVER.md.
-ssh receiver-host
-sudo useradd -r -m -d /var/lib/onionwarden -s /bin/bash onionwarden
-sudo git clone https://github.com/<you>/onionwarden.git /opt/onionwarden
-sudo /opt/onionwarden/scripts/generate-receiver-key.sh
-sudo -u onionwarden ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden/data \
-    /opt/onionwarden/receiver/receiver-setup.sh \
-    --hosts "relay_a relay_b ..."
-# add the cron entries from receiver/RECEIVER.md and per-host
-# authorized_keys lines (each pinned to its host_id; the pin
-# defends against the stolen-key threat).
-
-# 4. on each monitored host:
-git clone https://github.com/<you>/onionwarden.git
-cp onionwarden.pub onionwarden/
-# edit a per-host answers file (see examples/answers-canary.example)
-sudo bash onionwarden/install.sh \
-  --answers examples/answers-canary.example \
-  --pubkey  onionwarden.pub
-
-# 5. capture + sign the per-host baseline (off-box):
-onionwarden baseline collect
-# scp the bundle to the laptop, sign with onionwarden-sign, scp back
+git clone https://github.com/1aeo/onionwarden && cd onionwarden
+./bin/onionwarden-quickstart <monitored-host>
 ```
 
-Per-host config lives in `host.conf` (generated from the answers file by
-`install.sh`); fleet-wide overrides go in `.env`. Neither is committed.
+This SSHes into the host, runs every check **read-only** (nothing is written on
+the target, no root required), and prints the inventory — your first watch, at
+zero risk:
+
+```text
+onionwarden quickstart · read-only first watch of relay-a
+  -> snapshotting (read-only; nothing is written on the target) ...
+  -> analysing offline against an empty baseline (everything is "new") ... 24 checks captured
+
+  SEVERITY  CHECK                  SUMMARY
+  INFO      listening_sockets      4 listeners: 22, 9001, 9030, 9051
+  INFO      kernel_taint           taint flags: none (0)
+  INFO      sshd_config            PasswordAuthentication=no PermitRootLogin=no
+  ...
+  24 checks analysed - 0 CRIT - 0 WARN - 24 INFO
+```
+
+(Full sample: [examples/first-watch-output.txt](examples/first-watch-output.txt).)
+Under the hood that is two existing commands, if you prefer to run them yourself:
+
+```sh
+./bin/onionwarden snapshot <monitored-host> --out /tmp/ow-snap
+./bin/onionwarden run --from-snapshot /tmp/ow-snap
+```
+
+### 2. Wire up continuous monitoring
+
+Once the inventory looks right, set up the real collector → receiver → alert
+pipeline:
+
+| Step | What | Guide |
+|------|------|-------|
+| Make the fleet signing key (once) | `python3 lib/ed25519.py keygen onionwarden.priv onionwarden.pub` — keep `.priv` **offline** | — |
+| Stand up the receiver (once) | An off-fleet host: two users, cron, one pinned SSH key per host | [receiver/RECEIVER.md](receiver/RECEIVER.md) |
+| Onboard each host | Install the collector, sign its first baseline, prove the round-trip | [docs/ONBOARDING.md](docs/ONBOARDING.md) |
+
+`onionwarden-onboard` automates the typo-prone parts of onboarding; the runbook
+is the contract for the steps you do by hand in between. Hit a snag? See
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+## Common commands
+
+```sh
+onionwarden run [fast|slow|daily]      # run the watchdog now at a cadence
+onionwarden snapshot HOST              # read-only remote state capture (no install)
+onionwarden baseline collect|diff      # capture / compare a host baseline
+onionwarden sign ...                   # off-box Ed25519 signing of baselines/configs
+onionwarden suppress ...               # open a physical-access maintenance window
+onionwarden upgrade BUNDLE             # apply a signed update bundle
+onionwarden fleet-diff ...             # cross-host baseline diff (operator-side)
+onionwarden arm-fatal | fatal-status | fatal-dry-run   # kill-switch (ships disarmed)
+onionwarden version | help
+```
+
+## Configuration
+
+- **Per-host** settings live in `host.conf`, generated by `install.sh` from a
+  reviewable answers file — see
+  [examples/answers-canary.example](examples/answers-canary.example).
+- **Fleet-wide** defaults go in `.env` — copy [.env.example](.env.example).
+- Neither file is committed. The tunable knobs and their fleet defaults are in
+  [OPERATOR_DECISIONS.md](OPERATOR_DECISIONS.md).
+
+## Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, the full check inventory, the rollout phases |
+| [docs/ONBOARDING.md](docs/ONBOARDING.md) | End-to-end runbook for onboarding one host |
+| [receiver/RECEIVER.md](receiver/RECEIVER.md) | Receiver install, key/log rotation, host migration |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common first-run failures and fixes |
+| [examples/](examples/) | Answers-file templates + a sample first watch |
+| [PLAN.md](PLAN.md) | Full design, threat model, and phase breakdown (the spec, ~104 KB) |
+| [OPERATOR_DECISIONS.md](OPERATOR_DECISIONS.md) · [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) | Configurable knobs · build-time decisions |
 
 ## Stage output
 
@@ -135,9 +168,9 @@ python3 -m pytest tests/ -q       # 154 tests; collector + receiver + crypto
 bats tests/bats/                  # shell regression tests (incl. stage output)
 ```
 
-CI runs the same suite on every push to `main` and every PR
-(`.github/workflows/test.yml`).
+CI runs the same suite on Ubuntu 24.04 and 22.04 for every push to `main` and
+every PR (`.github/workflows/test.yml`).
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [LICENSE](LICENSE).
