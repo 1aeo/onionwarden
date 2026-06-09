@@ -109,12 +109,18 @@ EOF
     rm -f "$dest" "$dest.sig"
     # R4-2: genuinely revoke — stamp suppress_last newer than the cleared token
     # so it fails the monotonic anti-replay guard if re-installed.
-    mkdir -p "$(onionwarden_state_dir)" 2>/dev/null || true
+    # Persistence of the revocation marker is MANDATORY (CR major). Without it
+    # `suppress_physical_active` treats the missing marker as "no replay
+    # barrier", and the just-cleared token would be reinstallable while this
+    # command still printed "cleared and revoked". Fail hard on either error.
+    mkdir -p "$(onionwarden_state_dir)" \
+      || die "clear: failed to create suppression state directory"
     revoked=$(now_iso)
     if [ -n "$opened" ] && { [[ "$revoked" < "$opened" ]] || [[ "$revoked" == "$opened" ]]; }; then
       revoked="${opened}~clear"
     fi
-    printf '%s' "$revoked" > "$(onionwarden_state_dir)/suppress_last" 2>/dev/null || true
+    printf '%s' "$revoked" > "$(onionwarden_state_dir)/suppress_last" \
+      || die "clear: failed to persist suppression revocation marker"
     events_append suppress_clear INFO "physical-access window cleared + revoked by ${SUDO_USER:-${USER:-unknown}}" || true
     echo "suppression window cleared and revoked."
     ;;
