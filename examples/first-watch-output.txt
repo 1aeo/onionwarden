@@ -1,0 +1,28 @@
+$ ./bin/onionwarden-quickstart relay-a
+
+onionwarden quickstart · read-only first watch of relay-a
+  -> snapshotting (read-only; nothing is written on the target) ...
+  -> analysing offline against an empty baseline (everything is "new") ... 24 checks captured
+
+  SEVERITY  CHECK                  SUMMARY
+  INFO      listening_sockets      4 listeners: 22, 9001, 9030, 9051
+  INFO      kernel_taint           taint flags: none (0)
+  INFO      loaded_modules         142 modules loaded
+  INFO      accounts               1 UID-0 account: root; 1 admin: operator
+  INFO      sshd_config            PasswordAuthentication=no PermitRootLogin=no
+  INFO      ld_preload             /etc/ld.so.preload absent
+  INFO      scheduled_units        11 systemd timers, 3 cron jobs
+  INFO      suid_caps              84 SUID binaries, 6 with file capabilities
+  INFO      pkg_integrity          debsums: 0 modified files
+  INFO      nested_vm              no nested-VM layer detected
+  INFO      network_deep           outbound to 192.0.2.0/24 (AS64512); no promiscuous ifaces
+  INFO      local_console          no local-console login session
+  ... (12 more)
+
+  24 checks analysed - 0 CRIT - 0 WARN - 24 INFO
+
+This is a first-look inventory, not a verdict: with no signed baseline yet,
+every observation is reported as "new". To turn this into continuous,
+off-box monitoring with alerting:
+  - stand up a receiver   ->  receiver/RECEIVER.md
+  - onboard this host     ->  docs/ONBOARDING.md
