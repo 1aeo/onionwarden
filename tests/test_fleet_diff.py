@@ -309,3 +309,45 @@ for name in sys.argv[1:]:
     assert [d["line"] for d in role["indicators"]["modules"]["divergences"]] \
         == ["module rogue -"]
     assert (hd / "state" / "modules.state").read_text() == "module ext4 -\n"
+
+
+def test_pubkey_rejects_symlinked_state_to_prevent_post_verify_mutation(tmp_path, keypair):
+    priv, pub = keypair
+    fleet = tmp_path / "fleet"; fleet.mkdir()
+    _signed_host(fleet, "relay-a", {"modules": ["module ext4 -"]}, priv)
+    hd = _signed_host(fleet, "relay-b",
+                      {"modules": ["module ext4 -", "module rogue -"]}, priv)
+
+    mutable_target = tmp_path / "mutable_modules.state"
+    mutable_target.write_text("module ext4 -\nmodule rogue -\n")
+    (hd / "state" / "modules.state").unlink()
+    os.symlink(mutable_target, hd / "state" / "modules.state")
+
+    fakebin = tmp_path / "fakebin"; fakebin.mkdir()
+    wrapper = fakebin / "sha256sum"
+    wrapper.write_text("""#!/usr/bin/env python3
+import hashlib
+import os
+import pathlib
+import sys
+
+for name in sys.argv[1:]:
+    data = pathlib.Path(name).read_bytes()
+    print(f"{hashlib.sha256(data).hexdigest()}  {name}")
+    parts = pathlib.Path(name).parts
+    if "relay-b" in parts and name.endswith("/state/modules.state"):
+        pathlib.Path(os.environ["OW_SYMLINK_TARGET"]).write_text("module ext4 -\\n")
+""")
+    wrapper.chmod(0o755)
+
+    env_path = f"{fakebin}{os.pathsep}{os.environ.get('PATH', '')}"
+    cmd = [BASH, str(FLEET_DIFF), "--fleet-dir", str(fleet), "--pubkey", pub,
+           "--indicators", "modules", "--fail-on-divergence", "--format", "json"]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT),
+                            "PATH": env_path,
+                            "OW_SYMLINK_TARGET": str(mutable_target)})
+    assert r.returncode == 3
+    assert "relay-b" in r.stderr
+    assert "missing/unverified baseline" in r.stderr
+    assert mutable_target.read_text() == "module ext4 -\nmodule rogue -\n"

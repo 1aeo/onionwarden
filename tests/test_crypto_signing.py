@@ -92,6 +92,32 @@ def test_baseline_verify_detects_tampered_state(keypair):
     assert verify() == "FAIL"                  # signature covers its hash
 
 
+def test_baseline_verify_rejects_symlinked_state_even_when_hash_matches(keypair, tmp_path):
+    """Signed baselines must be self-contained regular files, not live links."""
+    priv, pub = keypair
+    bdir = tmp_path / "baseline"
+    state_dir = bdir / "state"
+    state_dir.mkdir(parents=True)
+    target = tmp_path / "mutable_taint.state"
+    target.write_text("tainted 0\n")
+    os.symlink(target, state_dir / "taint.state")
+
+    subprocess.run(
+        [BASH, "-c",
+         f'. "{ROOT}/lib/baseline.sh"; baseline_write_manifest "{bdir}" testhost'],
+        check=True, env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT)})
+    sign_file(priv, str(bdir / "manifest.json"))
+
+    out = subprocess.run(
+        [BASH, "-c",
+         f'export ONIONWARDEN_VERIFY_BACKEND=python; . "{ROOT}/lib/baseline.sh"; '
+         f'baseline_verify "{bdir}" "{pub}" && echo OK || echo FAIL'],
+        capture_output=True, text=True,
+        env={**os.environ, "ONIONWARDEN_ROOT": str(ROOT)})
+    assert out.stdout.strip() == "FAIL"
+    assert "symlink present" in out.stderr
+
+
 def test_pubkey_pin_mismatch_refused(keypair, tmp_path):
     """verify.sh refuses a pubkey whose hash != the embedded C2 pin."""
     priv, pub = keypair
