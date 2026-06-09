@@ -42,8 +42,15 @@ import sys
 import time
 import urllib.request
 
-ROOT = os.environ.get("ONIONWARDEN_RECEIVER_ROOT",
-                       os.path.join(os.path.expanduser("~"), "onionwarden"))
+
+def default_root():
+    script_dir = os.path.abspath(os.path.dirname(__file__))
+    if os.path.basename(script_dir) == ".bin":
+        return os.path.dirname(script_dir)
+    return os.path.join(os.path.expanduser("~"), "onionwarden")
+
+
+ROOT = os.environ.get("ONIONWARDEN_RECEIVER_ROOT", default_root())
 
 
 def host_dirs():

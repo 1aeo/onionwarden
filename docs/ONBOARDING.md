@@ -184,12 +184,14 @@ The script:
    applying `chattr +i` per `immutable_scripts` (PLAN §3.6, default ON),
    and leaving the host in the `bootstrapping` state (M2).
 5. Installs the signed `host.conf.sig` next to the conf.
-6. Adds the per-minute cron entry (`* * * * * /opt/onionwarden/bin/onionwarden run fast`).
-7. **Prints** the target's per-host SSH pubkey line for you to paste into
+6. Creates the per-host receiver SSH key at
+   `/etc/onionwarden/keys/offbox_ed25519`.
+7. Adds the per-minute cron entry (`* * * * * /opt/onionwarden/bin/onionwarden run fast`).
+8. **Prints** the target's per-host SSH pubkey line for you to paste into
    the receiver's authorized_keys (see Step 4). The script does not push
    it for you — receiver `authorized_keys` is a privileged edit and you
    own it.
-8. Fires the first run synchronously and exits.
+9. Fires the first run synchronously and exits.
 
 Exit code 0 means the install ran. It does **not** mean the host is
 "protected" yet — the first off-box-signed baseline is still pending
@@ -202,7 +204,7 @@ key from host A cannot append to host B's `events.log`). The line the
 script prints looks like:
 
 ```text
-restrict,command="/opt/onionwarden/receiver/receiver-append.sh <HOST>" ssh-ed25519 AAAA... onionwarden@<HOST>
+command="/var/lib/onionwarden/data/.bin/receiver-append.sh <HOST>",restrict ssh-ed25519 AAAA... onionwarden@<HOST>
 ```
 
 Add it to `/var/lib/onionwarden/.ssh/authorized_keys` on the receiver and
@@ -233,10 +235,15 @@ scp -r <HOST>:/var/lib/onionwarden/baseline.candidate/ hosts/<HOST>.baseline/
   --file hosts/<HOST>.baseline/manifest.json \
   --out  hosts/<HOST>.baseline/manifest.json.sig
 
-# push back:
-scp hosts/<HOST>.baseline/manifest.json{,.sig} <HOST>:/tmp/
-ssh <HOST> 'sudo install -m0644 /tmp/manifest.json /tmp/manifest.json.sig /var/lib/onionwarden/baseline/'
-ssh <HOST> 'sudo rm /var/lib/onionwarden/state/bootstrapping'
+# push back (manifest + signature + the signed state/ tree):
+ssh <HOST> 'rm -rf /tmp/onionwarden-baseline && mkdir -p /tmp/onionwarden-baseline'
+scp -r hosts/<HOST>.baseline/manifest.json hosts/<HOST>.baseline/manifest.json.sig \
+  hosts/<HOST>.baseline/state <HOST>:/tmp/onionwarden-baseline/
+ssh <HOST> 'sudo mkdir -p /var/lib/onionwarden/baseline && \
+  sudo rm -rf /var/lib/onionwarden/baseline/state && \
+  sudo cp -a /tmp/onionwarden-baseline/state /var/lib/onionwarden/baseline/ && \
+  sudo install -m0644 /tmp/onionwarden-baseline/manifest.json \
+    /tmp/onionwarden-baseline/manifest.json.sig /var/lib/onionwarden/baseline/'
 ```
 
 The next `onionwarden run` will exit `bootstrapping` (M2). From this

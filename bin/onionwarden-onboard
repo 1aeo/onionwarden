@@ -526,13 +526,14 @@ _install() {
   plan "ssh $SSH_TARGET 'sudo install -m0600 /tmp/onionwarden-host.conf.sig /etc/onionwarden/host.conf.sig'"
   _ssh "$SSH_TARGET" "sudo install -m0600 /tmp/onionwarden-host.conf.sig /etc/onionwarden/host.conf.sig"
 
+  plan "ssh $SSH_TARGET 'create /etc/onionwarden/keys/offbox_ed25519(.pub) if missing'"
+  _ssh "$SSH_TARGET" "if sudo test -f /etc/onionwarden/keys/offbox_ed25519.pub; then :; elif sudo test -f /etc/onionwarden/keys/offbox_ed25519; then sudo sh -c 'ssh-keygen -y -f /etc/onionwarden/keys/offbox_ed25519 > /etc/onionwarden/keys/offbox_ed25519.pub && chmod 0644 /etc/onionwarden/keys/offbox_ed25519.pub'; else sudo ssh-keygen -t ed25519 -N '' -f /etc/onionwarden/keys/offbox_ed25519 -C onionwarden@$HOST; fi"
+
   plan "ssh $SSH_TARGET 'sudo crontab -l 2>/dev/null | grep -q \"onionwarden run\" || (sudo crontab -l 2>/dev/null; echo \"* * * * * /opt/onionwarden/bin/onionwarden run fast\") | sudo crontab -'"
   _ssh "$SSH_TARGET" "sudo crontab -l 2>/dev/null | grep -q 'onionwarden run' || (sudo crontab -l 2>/dev/null; echo '* * * * * /opt/onionwarden/bin/onionwarden run fast') | sudo crontab -"
 
   # Push the target's per-host SSH key out to the receiver authorized_keys.
-  # The script does NOT generate the key itself (the operator owns key custody);
-  # it asks the target to print its existing ed25519 public half and prints
-  # the authorized_keys line for the operator to paste into the receiver.
+  # It prints the public half for the operator to paste into the receiver.
   step "Receiver wiring — events.log forced-command key"
   plan "ssh $SSH_TARGET 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub'"
   if [ "$DRY_RUN" != 1 ]; then
@@ -541,11 +542,10 @@ _install() {
     publine=$(ssh "${_SSH_FLAGS[@]}" 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub' 2>/dev/null || true)
     if [ -n "$publine" ]; then
       ok "host-side per-host signing key already present"
-      printf '\nPaste into the receiver authorized_keys (PLAN §4):\n  restrict,command="$ONIONWARDEN_RECEIVER_ROOT/.bin/receiver-append.sh %s" %s\n\n' "$HOST" "$publine"
-      printf 'Replace $ONIONWARDEN_RECEIVER_ROOT with the actual path (default: /var/lib/onionwarden).\n\n'
+      printf '\nPaste into the receiver authorized_keys (PLAN §4, CRITIQUE_RECEIVER_R1):\n  command="/var/lib/onionwarden/data/.bin/receiver-append.sh %s",restrict %s\n\n' "$HOST" "$publine"
     else
-      warn "no per-host offbox key on target — generate now and paste pub line into receiver authorized_keys"
-      plan "ssh $SSH_TARGET 'sudo ssh-keygen -t ed25519 -N \"\" -f /etc/onionwarden/keys/offbox_ed25519 -C onionwarden@$HOST'"
+      warn "per-host offbox key generation did not leave a readable public key"
+      EXITCODE=4 die "receiver wiring cannot continue without /etc/onionwarden/keys/offbox_ed25519.pub"
     fi
   fi
 
@@ -558,10 +558,12 @@ _install() {
 
 NEXT (manual — first baseline; PLAN §5):
   ssh $SSH_TARGET 'sudo /opt/onionwarden/bin/onionwarden baseline collect'
-  scp $SSH_TARGET:/var/lib/onionwarden/baseline.candidate/ $BASELINE_DIR/
+  scp -r $SSH_TARGET:/var/lib/onionwarden/baseline.candidate/ $BASELINE_DIR/
   onionwarden baseline diff --baseline <prev> --candidate $BASELINE_DIR
   onionwarden sign sign --key <priv> --file $BASELINE_DIR/manifest.json
-  scp $BASELINE_DIR/manifest.json{,.sig} $SSH_TARGET:/var/lib/onionwarden/baseline/
+  ssh $SSH_TARGET 'rm -rf /tmp/onionwarden-baseline && mkdir -p /tmp/onionwarden-baseline'
+  scp -r $BASELINE_DIR/manifest.json $BASELINE_DIR/manifest.json.sig $BASELINE_DIR/state $SSH_TARGET:/tmp/onionwarden-baseline/
+  ssh $SSH_TARGET 'sudo mkdir -p /var/lib/onionwarden/baseline && sudo rm -rf /var/lib/onionwarden/baseline/state && sudo cp -a /tmp/onionwarden-baseline/state /var/lib/onionwarden/baseline/ && sudo install -m0644 /tmp/onionwarden-baseline/manifest.json /tmp/onionwarden-baseline/manifest.json.sig /var/lib/onionwarden/baseline/'
   $PROG --verify $HOST
 
 EOF

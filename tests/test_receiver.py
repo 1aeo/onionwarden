@@ -171,6 +171,37 @@ def test_appender_stamps_recv_ts(tmp_path):  # R2-F2
     assert ev["host_id"] == "relay_a" and ev["seq"] == 1
 
 
+def test_installed_receiver_helpers_derive_shared_root_without_env(tmp_path):
+    """SSH ForceCommand does not propagate cron env; .bin helpers must agree."""
+    import shutil
+
+    root = tmp_path / "receiver-root"
+    bindir = root / ".bin"
+    bindir.mkdir(parents=True)
+    appender = bindir / "receiver-append.sh"
+    receiver = bindir / "onionwarden-receiver"
+    shutil.copy(APPEND, appender)
+    shutil.copy(RECEIVER, receiver)
+    appender.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items()
+           if k != "ONIONWARDEN_RECEIVER_ROOT"}
+    env["HOME"] = str(home)
+
+    subprocess.run([BASH, str(appender)],
+                   input=_ev(1, "relay_a", "selfreport", "INFO",
+                             {"selfhash": "aaa", "pubkeyhash": "ppp"}) + "\n",
+                   text=True, env=env, check=True)
+    assert (root / "relay_a" / "events.log").exists()
+    assert not (home / "onionwarden" / "relay_a" / "events.log").exists()
+
+    r = subprocess.run(["python3", str(receiver), "verify-record"],
+                       capture_output=True, text=True, env=env, check=False)
+    assert r.returncode == 0, r.stderr
+    assert (root / "relay_a" / "known_good.json").exists()
+
+
 def test_events_log_age_uses_recv_ts_over_mtime(tmp_path):  # R2-F2
     """A bare `touch` cannot mask staleness — recv_ts of the latest event
     is the authoritative freshness signal."""
