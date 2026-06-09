@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# bin/onionwarden-quickstart — zero-risk first look at onionwarden.
+#
+# Snapshots ONE host READ-ONLY and analyses it offline, printing the check
+# inventory. Nothing is installed, nothing is written on the target, and no
+# receiver, baseline, or signing key is required. This is the "see it work
+# before you commit to a rollout" path from the README Quick Start.
+#
+# It is a thin wrapper over two existing commands:
+#   onionwarden snapshot HOST --out DIR     (read-only remote capture, Mode A)
+#   onionwarden run --from-snapshot DIR     (offline analysis, no alerts)
+# All state is kept in a private temp dir, so it runs as an unprivileged user
+# on any OS (a macOS or Linux operator laptop).
+#
+# Usage:
+#   onionwarden-quickstart HOST [--with-sudo] [--ssh-opt OPT]...
+#
+#   HOST           ssh target to inspect (e.g. relay-a, user@host, an alias)
+#   --with-sudo    let read-only collectors use `sudo -n` on the target for the
+#                  few checks that need root (still no writes on the target)
+#   --ssh-opt OPT  pass one extra option through to ssh (repeatable)
+set -euo pipefail
+
+_bin_dir=$(cd "$(dirname "$0")" && pwd)
+
+usage() {
+  sed -n '15,21p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+HOST=""
+PASS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)   usage; exit 0 ;;
+    --with-sudo) PASS+=("--with-sudo"); shift ;;
+    --ssh-opt)   PASS+=("--ssh-opt" "${2:?--ssh-opt needs an argument}"); shift 2 ;;
+    -*)          printf 'onionwarden-quickstart: unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [ -z "$HOST" ]; then HOST=$1; shift
+      else printf 'onionwarden-quickstart: unexpected argument: %s\n\n' "$1" >&2; usage >&2; exit 2; fi ;;
+  esac
+done
+[ -n "$HOST" ] || { usage >&2; exit 2; }
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/onionwarden-quickstart.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+snap="$work/snapshot"
+
+printf 'onionwarden quickstart · read-only first watch of %s\n' "$HOST"
+printf '  -> snapshotting (read-only; nothing is written on the target) ...\n'
+if ! "$_bin_dir/onionwarden" snapshot "$HOST" --out "$snap" ${PASS[@]+"${PASS[@]}"}; then
+  {
+    printf '\nonionwarden-quickstart: snapshot failed.\n'
+    printf '  Most likely SSH cannot reach %s non-interactively. Try:\n' "$HOST"
+    printf '    ssh %s true\n' "$HOST"
+    printf '  and load your key (ssh-add) or fix ~/.ssh/config, then re-run.\n'
+  } >&2
+  exit 1
+fi
+
+captured=$(find "$snap" -maxdepth 1 -name '*.current' 2>/dev/null | wc -l | tr -d ' ')
+printf '  -> analysing offline against an empty baseline (everything is "new") ... %s checks captured\n\n' "$captured"
+
+# Keep every write inside the temp dir so this needs no root and no /var paths.
+ONIONWARDEN_LOG_DIR="$work/log" ONIONWARDEN_STATE_DIR="$work/state" \
+  "$_bin_dir/onionwarden" run --from-snapshot "$snap" >/dev/null 2>&1 || true
+
+findings="$snap/findings.ndjson"
+crit=0; warn=0; info=0
+if [ -s "$findings" ]; then
+  printf '  %-9s %-22s %s\n' SEVERITY CHECK SUMMARY
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sev=$(printf '%s' "$line" | sed -n 's/.*"severity":"\([A-Z]*\)".*/\1/p')
+    chk=$(printf '%s' "$line" | sed -n 's/.*"check":"\([^"]*\)".*/\1/p')
+    sum=$(printf '%s' "$line" | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p')
+    case "$sev" in
+      CRIT) crit=$((crit+1)) ;;
+      WARN) warn=$((warn+1)) ;;
+      INFO) info=$((info+1)) ;;
+      *)    continue ;;
+    esac
+    printf '  %-9s %-22s %s\n' "$sev" "$chk" "$sum"
+  done < "$findings"
+  printf '\n'
+fi
+
+printf '  %s checks analysed - %s CRIT - %s WARN - %s INFO\n\n' "$captured" "$crit" "$warn" "$info"
+cat <<'EOF'
+This is a first-look inventory, not a verdict: with no signed baseline yet,
+every observation is reported as "new". To turn this into continuous,
+off-box monitoring with alerting:
+  - stand up a receiver   ->  receiver/RECEIVER.md
+  - onboard this host     ->  docs/ONBOARDING.md
+EOF
