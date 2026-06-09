@@ -115,5 +115,6 @@ if [ "$ENABLE" = 1 ]; then
   fi
 else
   say "rendered drop-ins; not enabled. Re-run with --enable (or: systemctl"
-  say "daemon-reload && systemctl enable --now systemd-journal-remote.socket)"
+  say "daemon-reload && systemctl enable systemd-journal-remote.socket && systemctl"
+  say "restart systemd-journal-remote.socket)"
 fi

@@ -14,7 +14,8 @@
 #   --http           INSECURE: plain http, no client/server certs (lab only)
 #   --root DIR       write under DIR (scratch/test root; default /)
 #   --print          render every drop-in to stdout, write nothing
-#   --enable         systemctl enable --now systemd-journal-upload (needs systemd)
+#   --enable         daemon-reload, restart journald, enable + restart
+#                    systemd-journal-upload (needs systemd)
 #   --dry-run        print actions, change nothing
 #
 # Rendering is deterministic — re-running overwrites each drop-in with identical
@@ -147,5 +148,6 @@ if [ "$ENABLE" = 1 ]; then
   fi
 else
   say "rendered drop-ins; not enabled. Re-run with --enable (or: systemctl"
-  say "daemon-reload && systemctl enable --now systemd-journal-upload.service)"
+  say "daemon-reload && systemctl restart systemd-journald && systemctl enable"
+  say "systemd-journal-upload.service && systemctl restart systemd-journal-upload.service)"
 fi
