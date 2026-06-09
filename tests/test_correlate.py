@@ -207,10 +207,17 @@ def test_ip_spray_counts_later_repeat_inside_window(tmp_path):
 
 
 def test_ip_spray_compressed_ipv6_source_across_hosts(tmp_path):
+    # Mixed spellings of the SAME address must canonicalize and cluster — locks
+    # down the canonicalize-then-key path, not just extraction (CR nit).
+    observed_by_host = {
+        "relay-a": "2001:db8::1",
+        "relay-b": "2001:0db8:0:0:0:0:0:1",
+        "relay-c": "[2001:db8::1]:22",
+    }
     for h, t in (("relay-a", "11:00:00"), ("relay-b", "11:02:00"),
                  ("relay-c", "11:09:00")):
         _ev(tmp_path, h, sev="WARN", check="auth_log", signal="ssh_logins",
-            observed="2001:db8::1", recv_ts="2026-05-29T%sZ" % t)
+            observed=observed_by_host[h], recv_ts="2026-05-29T%sZ" % t)
     doc = _json(tmp_path, "2026-05-29T11:30:00Z")
     spray = [c for c in doc["clusters"] if c["kind"] == "ip-spray"]
     assert len(spray) == 1

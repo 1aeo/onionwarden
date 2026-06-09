@@ -121,12 +121,20 @@ def read_events(host_dir):
 
 
 def host_stale_minutes(host_dir, default):
-    """Per-host override at <host_dir>/.stale_minutes; fall back to default."""
+    """Per-host override at <host_dir>/.stale_minutes; fall back to default.
+
+    Only strictly positive integers are honoured. 0 or a negative value would
+    make the blackout check treat the host as immediately silent and recreate
+    the very spurious-CRIT cluster the CLI's `--stale-min > 0` guard prevents
+    (CR major). Any other parse/IO error also falls back to `default`.
+    """
     path = os.path.join(host_dir, ".stale_minutes")
     if os.path.isfile(path):
         try:
             with open(path) as f:
-                return int(f.read().strip())
+                value = int(f.read().strip())
+                if value > 0:
+                    return value
         except (OSError, ValueError):
             pass
     return default
