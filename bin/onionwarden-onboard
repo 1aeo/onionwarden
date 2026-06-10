@@ -586,7 +586,7 @@ _verify() {
     step "Dead-man's switch round-trip (PLAN §3.7 first-arm checklist item 5)"
     local stop_cmd='sudo systemctl stop onionwarden-fast.timer 2>/dev/null; sudo crontab -l 2>/dev/null | grep -v "onionwarden run" | sudo crontab -'
     local restore_cmd='sudo systemctl start onionwarden-fast.timer 2>/dev/null || ( ( sudo crontab -l 2>/dev/null; echo "* * * * * /opt/onionwarden/bin/onionwarden run fast" ) | sudo crontab - )'
-    local check_cmd="test -f /var/lib/onionwarden/data/${HOST}/events.log && [ \$(( \$(date +%s) - \$(stat -c %Y /var/lib/onionwarden/data/${HOST}/events.log) )) -gt 180 ] && echo 1 || echo 0"
+    local check_cmd="test -f /var/lib/onionwarden/data/${HOST}/events.log && [ \$(( \$(date +%s) - \$(stat -c %Y /var/lib/onionwarden/data/${HOST}/events.log) )) -gt ${STALE_WINDOW} ] && echo 1 || echo 0"
 
     plan "ssh $SSH_TARGET '$stop_cmd'"
     plan "sleep $STALE_WINDOW  (wait $STALE_WINDOW s for receiver to detect staleness)"
