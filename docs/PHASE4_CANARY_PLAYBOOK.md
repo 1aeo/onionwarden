@@ -159,7 +159,7 @@ Use the `ack` subcommand; `--reason` is **mandatory**:
 onionwarden canary ack \
     --finding-id a8dabdc6ebe8cebf \
     --reason "nfsd is expected on this NFS-backed canary; reviewed w/ infra" \
-    --signer  ops-joey \
+    --signer  <operator-username> \
     --ttl-hours 72            # default 72h; the ack expires and HOLD returns
 ```
 
@@ -168,7 +168,7 @@ Each ack appends one audit record to **`/var/lib/onionwarden/canary/acks.jsonl`*
 
 ```json
 {"finding_id":"a8dabdc6ebe8cebf","alert_hash":"a8dabdc6ebe8cebf",
- "ts":"2026-05-28T11:00:00Z","signer":"ops-joey",
+ "ts":"2026-05-28T11:00:00Z","signer":"<operator-username>",
  "reason":"nfsd is expected ...","ttl_hours":72}
 ```
 
@@ -206,7 +206,7 @@ unexplained:    0  (acked WARN patterns: 2)
 acked CRITs:    1  (eyes-open — see below)
 last event:     1 min ago
 --- acknowledged CRITs (eyes open, expire) ---
-  CRIT seq=2 modules/new-module  by ops-joey: nfsd is expected ...
+  CRIT seq=2 modules/new-module  by <operator-username>: nfsd is expected ...
 GATE: WARN — 1 acknowledged CRIT(s) — rolling forward with eyes open (WARN, not PASS)
 ```
 
