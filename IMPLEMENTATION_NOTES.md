@@ -133,7 +133,7 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   time-windowed.
 - **`filesystem.sh` watchdog-path hardcoding** — the immutable-bit fatal-#8
   watch hardcodes `/opt/onionwarden/...`; correct for a standard install, but a
-  relocated install would not be watched. (Flagged in CRITIQUE_R2.)
+  relocated install would not be watched. (Flagged during self-critique.)
 - **Vixie cron rejects empty-value env-var lines.** On Ubuntu 24.04 / Debian 13
   the `cron` package is Vixie cron `3.0pl1-184ubuntu2`. An env-var line of the
   form `FOO=` (assignment to empty value) is rejected with `Error: bad minute`
@@ -143,8 +143,9 @@ known limitations. Read alongside `PLAN.md` (design) and `OPERATOR_DECISIONS.md`
   `ONIONWARDEN_RECEIVER_NTFY` commented out by default; operators uncomment +
   assign a value when ntfy is configured. A regression test
   (`tests/test_receiver.py::test_receiver_md_cron_heredoc_has_no_empty_env_var`)
-  asserts no empty-value `ONIONWARDEN_*=` line is reintroduced. Diagnosed on
-  the 192.0.2.41 deploy 2026-05-24.
+  asserts no empty-value `ONIONWARDEN_*=` line is reintroduced. Diagnosed in
+  the simulated 192.0.2.41 (TEST-NET-1) test-deploy 2026-05-24 — consistent
+  with the build-and-local-test scope above; no real host was provisioned.
 
 ## Offline snapshot mode (Mode A dry-run)
 
@@ -197,7 +198,7 @@ would flood the outbound check.
   Production on Ubuntu 24.04 / Debian 13 uses `openssl pkeyutl` (OpenSSL 3.x).
 - Run the suite: `python3 -m pytest tests/ -q` (154 tests, all passing).
 
-## Post-critique residuals (see CRITIQUE_R*.md / CRITIQUE_LOG.md)
+## Post-critique residuals
 
 Ten self-critique rounds folded 30+ fixes back in. Two items are documented
 *residuals* rather than fixed defects:
@@ -212,25 +213,3 @@ Ten self-critique rounds folded 30+ fixes back in. Two items are documented
   not implemented — the plan itself rates it "a complementary signal, not
   load-bearing" (firmware flaps connector status). Input-device (#10) and
   console-login (#11) — the load-bearing physical signals — are implemented.
-
-## Historical
-
-- **`secwatch` → `onionwarden` rename.** Early development used the internal
-  working name `secwatch`. The codebase was renamed before public release,
-  and the one deployed receiver carrying the legacy on-disk paths was
-  migrated separately as a one-off. The project has never shipped under the
-  `secwatch` name to external users, so no rename-in-place tooling lives in
-  this repo.
-- **`receiver/MIGRATION_TO_PROXMOX.md` removed.** That document was a
-  one-time internal runbook for the staging-VM → public-Proxmox cutover of
-  the operator's own receiver. No external user has that migration to do
-  (no one else stood up a `secwatch`-era receiver on a staging VM), so the
-  doc was deleted to avoid implying it's a required part of the install
-  flow. The one section worth keeping for any operator — the 4-step
-  dual-pin signing-key rotation protocol — was moved into
-  `receiver/RECEIVER.md` §"Rotating the signing key". Generic host-migration
-  steps (snapshot → rsync → re-arm `+a` → cut over → decommission) remain
-  in `RECEIVER.md` §"Migrating the receiver to a new host". The
-  Proxmox-specific bits (`ssh.socket.d/listen.conf`, ufw narrowing,
-  snapshot timing) were intentionally not preserved — they're either
-  provider docs or live operator notes, not project documentation.
