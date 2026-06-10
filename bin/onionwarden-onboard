@@ -83,9 +83,13 @@ plan()   { printf '  [plan] %s\n' "$*" >&2; }
 #   would copy-paste. Real execution always goes through an argv array.
 _quote_arg() {
   local s=$1
+  # Replace each embedded single quote with the POSIX-portable '\'' idiom.
+  # The replacement must come from a variable: an inline literal in
+  # ${s//.../...} gets its backslashes re-processed by bash and mangled.
+  local q=\' esc=\'\\\'\'
   case "$s" in
     *[[:space:]\|\&\;\<\>\(\)\$\`\\\"\'\!\*\?\#\~]*|"")
-      printf "'%s'" "${s//\'/\'\\\'\'}"
+      printf "'%s'" "${s//$q/$esc}"
       ;;
     *)
       printf '%s' "$s"
@@ -664,7 +668,7 @@ _rollback() {
   plan "ssh $SSH_TARGET 'sudo systemctl disable --now onionwarden-fast.timer onionwarden-slow.timer onionwarden-daily.timer 2>/dev/null || true'"
   _ssh "$SSH_TARGET" "sudo systemctl disable --now onionwarden-fast.timer onionwarden-slow.timer onionwarden-daily.timer 2>/dev/null || true"
 
-  plan "ssh $SSH_TARGET 'sudo crontab -l 2>/dev/null | grep -v \"onionwarden run\" | sudo crontab -'"
+  plan "ssh $SSH_TARGET 'sudo crontab -l 2>/dev/null | grep -v 'onionwarden run' | sudo crontab -'"
   _ssh "$SSH_TARGET" "sudo crontab -l 2>/dev/null | grep -v 'onionwarden run' | sudo crontab -"
 
   plan "ssh $SSH_TARGET 'sudo chattr -R -i /opt/onionwarden /etc/onionwarden 2>/dev/null || true'"
