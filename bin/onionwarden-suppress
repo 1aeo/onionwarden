@@ -91,10 +91,10 @@ EOF
     mkdir -p "$(dirname "$dest")"
     cp "$token" "$dest"; cp "$sig" "$dest.sig"
     if suppress_physical_active; then
-      events_append suppress_open INFO "physical-access window opened: $(_supp_field "$dest" reason)" \
+      events_append suppress_open INFO "physical-access window opened: $(json_field "$dest" reason)" \
         "$(printf '{"operator":"%s","expires_at":"%s"}' \
-           "$(_supp_field "$dest" operator)" "$(_supp_field "$dest" expires_at)")" || true
-      echo "suppression window ACTIVE until $(_supp_field "$dest" expires_at)"
+           "$(json_field "$dest" operator)" "$(json_field "$dest" expires_at)")" || true
+      echo "suppression window ACTIVE until $(json_field "$dest" expires_at)"
     else
       die "install: token verified but window not active (expired, future-dated, or replayed)"
     fi
@@ -104,11 +104,18 @@ EOF
     ;;
   clear)
     dest=$(suppress_token_path)
+    opened=""
+    [ -f "$dest" ] && opened=$(json_field "$dest" opened_at)
     rm -f "$dest" "$dest.sig"
-    # R4-2: genuinely revoke — stamp suppress_last to now so the cleared token
-    # (and any older one) fails the monotonic anti-replay guard if re-installed.
+    # R4-2: genuinely revoke — stamp suppress_last strictly after the cleared
+    # token's opened_at, even when request/install/clear all happen in one
+    # second, so the token fails the monotonic anti-replay guard if re-installed.
     mkdir -p "$(onionwarden_state_dir)" 2>/dev/null || true
-    printf '%s' "$(now_iso)" > "$(onionwarden_state_dir)/suppress_last" 2>/dev/null || true
+    marker=$(now_iso)
+    if [ -n "$opened" ] && { [[ "$marker" < "$opened" ]] || [[ "$marker" == "$opened" ]]; }; then
+      marker="${opened}~clear"
+    fi
+    printf '%s' "$marker" > "$(onionwarden_state_dir)/suppress_last" 2>/dev/null || true
     events_append suppress_clear INFO "physical-access window cleared + revoked by ${SUDO_USER:-${USER:-unknown}}" || true
     echo "suppression window cleared and revoked."
     ;;

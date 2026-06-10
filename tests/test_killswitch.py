@@ -156,6 +156,7 @@ def test_suppress_rejects_expired_token(kstree):
 def test_suppress_clear_revokes_token(kstree):
     """R4-2: after `clear`, re-installing the same captured token is refused."""
     _write_conf(kstree)
+    kstree["env"]["ONIONWARDEN_NOW"] = "2026-06-10T02:00:00Z"
     tok = kstree["dir"] / "tok"
     _suppress(kstree, "request", "--reason", "visit", "--duration", "60m",
               "--out", str(tok))
