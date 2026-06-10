@@ -4,6 +4,10 @@ The off-box receiver. Runs on a single, off-fleet host. Collects per-host
 event lines over a forced-command SSH key, runs the cron-driven
 verification, and pushes to ntfy on CRIT.
 
+New to onionwarden? Start with the [project README](../README.md) and
+[ARCHITECTURE.md](../docs/ARCHITECTURE.md); the full install runbook is
+[RECEIVER.md](RECEIVER.md).
+
 ## Files
 
 | File | Role |

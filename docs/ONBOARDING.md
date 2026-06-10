@@ -14,8 +14,12 @@ human reviewer is).
 ## Audience & scope
 
 Operators who already understand `onionwarden`'s architecture. If you have
-never read it, start with [`README.md`](../README.md) and at minimum the
-PLAN sections referenced below — this document does not re-derive them.
+never read it, start with [`README.md`](../README.md), then
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the component model and at minimum the
+PLAN sections referenced below — this document does not re-derive them. For a
+zero-risk feel of what the checks report before onboarding anything, run the
+read-only [first watch](../README.md#quick-start-5-minutes)
+(`onionwarden-quickstart <host>`).
 
 **This runbook covers Phase 0 and Phase 1 for one host:** standing up the
 watchdog code, signing the first per-host artifacts, and proving the
@@ -351,6 +355,9 @@ After `--install` and the first signed baseline (Step 5), confirm each:
 ---
 
 ## Troubleshooting
+
+Onboarding-specific issues are below. For first-watch, install, receiver, and
+test/CI failures, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 ### `--check` reports "cannot SSH non-interactively"
 
