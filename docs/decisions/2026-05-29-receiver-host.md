@@ -4,7 +4,7 @@
 - **Date:** 2026-05-29
 - **Resolves:** `OPERATOR_DECISIONS.md` §3 (`offbox_log_target` placeholder),
   which blocks Phase 0 and the canary rollout (`docs/PHASE4_CANARY_PLAYBOOK.md`).
-- **Owner to decide:** Joey.
+- **Owner to decide:** the operator.
 
 This record **does not pick the host.** It lays out what onionwarden actually
 requires of a receiver, the candidate options, and the trade-offs, so the
