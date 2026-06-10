@@ -206,6 +206,26 @@ def test_ip_spray_counts_later_repeat_inside_window(tmp_path):
     assert spray[0]["spread_min"] == 9.0
 
 
+def test_ip_spray_compressed_ipv6_source_across_hosts(tmp_path):
+    # Mixed spellings of the SAME address must canonicalize and cluster — locks
+    # down the canonicalize-then-key path, not just extraction (CR nit).
+    observed_by_host = {
+        "relay-a": "2001:db8::1",
+        "relay-b": "2001:0db8:0:0:0:0:0:1",
+        "relay-c": "[2001:db8::1]:22",
+    }
+    for h, t in (("relay-a", "11:00:00"), ("relay-b", "11:02:00"),
+                 ("relay-c", "11:09:00")):
+        _ev(tmp_path, h, sev="WARN", check="auth_log", signal="ssh_logins",
+            observed=observed_by_host[h], recv_ts="2026-05-29T%sZ" % t)
+    doc = _json(tmp_path, "2026-05-29T11:30:00Z")
+    spray = [c for c in doc["clusters"] if c["kind"] == "ip-spray"]
+    assert len(spray) == 1
+    assert spray[0]["key"] == "ip:2001:db8::1"
+    assert spray[0]["severity"] == "CRIT"
+    assert spray[0]["host_count"] == 3
+
+
 def test_ip_spray_ignores_bind_all_address(tmp_path):
     """0.0.0.0 is a bind-all, not a peer — must not become an ip-spray key."""
     for h, t in (("relay-a", "11:00:00"), ("relay-b", "11:02:00"),
@@ -233,6 +253,19 @@ def test_blackout_simultaneous_silence(tmp_path):
     assert len(black) == 1
     assert set(black[0]["hosts"]) == {"relay-a", "relay-b", "relay-c"}
     assert "relay-d" not in black[0]["hosts"]
+
+
+def test_blackout_honors_per_host_stale_override(tmp_path):
+    for h, t in (("relay-a", "10:00:00"), ("relay-b", "10:02:00"),
+                 ("relay-c", "10:05:00")):
+        _silent_host(tmp_path, h, "2026-05-29T%sZ" % t)
+        (tmp_path / h / ".stale_minutes").write_text("1440\n")
+    r = _run(tmp_path, "2026-05-29T11:30:00Z", "--min-hosts", "3",
+             "--stale-min", "30")
+    assert r.returncode == 0
+    doc = _json(tmp_path, "2026-05-29T11:30:00Z", "--min-hosts", "3",
+                "--stale-min", "30")
+    assert not any(c["kind"] == "blackout" for c in doc["clusters"])
 
 
 def test_blackout_not_fired_when_silences_spread_out(tmp_path):
