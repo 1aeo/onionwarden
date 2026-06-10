@@ -83,8 +83,8 @@ sudo -u onionwarden ONIONWARDEN_RECEIVER_ROOT=/var/lib/onionwarden/data \
     /opt/onionwarden/receiver/receiver-setup.sh \
     --hosts "relay_a relay_b ..."
 # add the cron entries from receiver/RECEIVER.md and per-host
-# authorized_keys lines (each pinned to its host_id; see R1 in
-# CRITIQUE_RECEIVER_R1.md for the stolen-key threat that pin defends).
+# authorized_keys lines (each pinned to its host_id; the pin
+# defends against the stolen-key threat).
 
 # 4. on each monitored host:
 git clone https://github.com/<you>/onionwarden.git

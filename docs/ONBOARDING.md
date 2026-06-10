@@ -96,7 +96,7 @@ Do these **by hand**, with your eyes on every line (the script will not):
   trust-expanding deltas is not signable without an out-of-band scan
   (`--offline-scan-attested`).
 - Add the per-host authorized_keys line into the receiver (the script
-  prints it; you paste it — pinning is the whole point per CRITIQUE_RECEIVER_R1).
+  prints it; you paste it — pinning is the whole point).
 
 Never let the script generate, store, or transport the operator private key.
 Never let the script auto-arm `fatal_action` (PLAN §3.7 ships disarmed by
@@ -193,7 +193,7 @@ Exit code 0 means the install ran. It does **not** mean the host is
 
 ### Step 4 — wire the receiver (manual)
 
-The receiver enforces the per-host pin (CRITIQUE_RECEIVER_R1 — a stolen
+The receiver enforces the per-host pin (a stolen
 key from host A cannot append to host B's `events.log`). The line the
 script prints looks like:
 
@@ -430,4 +430,4 @@ acceptable; for steady-state hosts move `/opt/onionwarden` to ext4/xfs/btrfs.
   line; you paste it. A wrong paste here (forgetting `restrict` /
   forgetting the per-host `command="…"`) silently widens the receiver's
   attack surface to "any host with this key can write any host's log."
-  The pin is the security control (CRITIQUE_RECEIVER_R1).
+  The pin is the security control.

@@ -493,7 +493,7 @@ _install() {
     publine=$(ssh "${_SSH_FLAGS[@]}" 'sudo cat /etc/onionwarden/keys/offbox_ed25519.pub' 2>/dev/null || true)
     if [ -n "$publine" ]; then
       ok "host-side per-host signing key already present"
-      printf '\nPaste into the receiver authorized_keys (PLAN §4, CRITIQUE_RECEIVER_R1):\n  restrict,command="/opt/onionwarden/receiver/receiver-append.sh %s" %s\n\n' "$HOST" "$publine"
+      printf '\nPaste into the receiver authorized_keys (PLAN §4):\n  restrict,command="/opt/onionwarden/receiver/receiver-append.sh %s" %s\n\n' "$HOST" "$publine"
     else
       warn "no per-host offbox key on target — generate now and paste pub line into receiver authorized_keys"
       plan "ssh $SSH_TARGET 'sudo ssh-keygen -t ed25519 -N \"\" -f /etc/onionwarden/keys/offbox_ed25519 -C onionwarden@$HOST'"
