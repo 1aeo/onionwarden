@@ -72,5 +72,5 @@ done
 
 Then record each host's verdict back into `OPERATOR_DECISIONS.md` §6 / the
 Appendix-A inventory and plan the offline scan per the (a)/(b) split above. If
-`onionwarden fleet-diff` (PR: fleet-diff) is in use, the inventory JSON can sit
+`onionwarden fleet-diff` is in use, the inventory JSON can sit
 alongside each host's baseline for cross-checking.
