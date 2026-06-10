@@ -25,6 +25,12 @@ stub_systemctl() {
   cat > "$ROOT/bin/systemctl" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+if [ "$1" = "is-active" ] && [ "${2:-}" = "--quiet" ]; then
+  case " ${SYSTEMCTL_ACTIVE_UNITS:-} " in
+    *" ${3:-} "*) exit 0 ;;
+    *) exit 3 ;;
+  esac
+fi
 SH
   chmod +x "$ROOT/bin/systemctl"
   export SYSTEMCTL="$ROOT/bin/systemctl"
@@ -137,7 +143,17 @@ SH
   run "$REMOTE" --root "$ROOT" --port 28000 --enable
   [ "$status" -eq 0 ]
   calls=$(< "$SYSTEMCTL_LOG")
-  expected=$'daemon-reload\nenable systemd-journal-remote.socket\nrestart systemd-journal-remote.socket'
+  expected=$'daemon-reload\nenable systemd-journal-remote.socket\nis-active --quiet systemd-journal-remote.service\nrestart systemd-journal-remote.socket'
+  [ "$calls" = "$expected" ]
+}
+
+@test "receiver --enable restarts an active remote service after rebinding the socket" {
+  stub_systemctl
+  export SYSTEMCTL_ACTIVE_UNITS="systemd-journal-remote.service"
+  run "$REMOTE" --root "$ROOT" --port 28000 --enable
+  [ "$status" -eq 0 ]
+  calls=$(< "$SYSTEMCTL_LOG")
+  expected=$'daemon-reload\nenable systemd-journal-remote.socket\nis-active --quiet systemd-journal-remote.service\nstop systemd-journal-remote.service\nrestart systemd-journal-remote.socket\nstart systemd-journal-remote.service'
   [ "$calls" = "$expected" ]
 }
 

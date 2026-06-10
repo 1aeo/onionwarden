@@ -106,15 +106,26 @@ if [ "$ENABLE" = 1 ]; then
     exit 1
   fi
   if command -v "$SYSTEMCTL" >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
+    remote_service_was_active=0
     "$SYSTEMCTL" daemon-reload
     "$SYSTEMCTL" enable systemd-journal-remote.socket
+    # The service is long-running after first activation; stop it before
+    # rebinding the socket so new cert/config and ListenStream settings apply.
+    if "$SYSTEMCTL" is-active --quiet systemd-journal-remote.service; then
+      remote_service_was_active=1
+      "$SYSTEMCTL" stop systemd-journal-remote.service
+    fi
     "$SYSTEMCTL" restart systemd-journal-remote.socket
-    say "systemd-journal-remote.socket enabled and restarted on port $PORT"
+    if [ "$remote_service_was_active" = 1 ]; then
+      "$SYSTEMCTL" start systemd-journal-remote.service
+      say "systemd-journal-remote.socket and active service restarted on port $PORT"
+    else
+      say "systemd-journal-remote.socket enabled and restarted on port $PORT"
+    fi
   else
     say "skipping systemctl enable (systemctl absent or --dry-run)"
   fi
 else
-  say "rendered drop-ins; not enabled. Re-run with --enable (or: systemctl"
-  say "daemon-reload && systemctl enable systemd-journal-remote.socket && systemctl"
-  say "restart systemd-journal-remote.socket)"
+  say "rendered drop-ins; not enabled. Re-run with --enable to reload the socket"
+  say "and any active systemd-journal-remote.service safely."
 fi
