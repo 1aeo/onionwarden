@@ -2,7 +2,7 @@
 
 ## Execution TODO
 
-Execution checklist — work top-to-bottom; check items off as they ship. Each item cites the PLAN.md section that specifies it (the design reference). The **Operator decisions** block must be answered before the phase work it blocks. This list reflects the *post-critique* plan (CRITIQUE.md, 2026-05-21).
+Execution checklist — work top-to-bottom; check items off as they ship. Each item cites the PLAN.md section that specifies it (the design reference). The **Operator decisions** block must be answered before the phase work it blocks. This list reflects the *post-critique* plan (2026-05-21 adversarial critique).
 
 ### Operator decisions — needed before / during Phase 0
 - [x] Confirm `relay-a` as the default rollout canary (§8 Q1) (default kept — OPERATOR_DECISIONS.md §1)
@@ -74,7 +74,7 @@ Execution checklist — work top-to-bottom; check items off as they ship. Each i
 **Goal:** a portable, watchdog-style tamper-monitoring tool deployable to **any Ubuntu 24.04 host** — bare metal, KVM/QEMU guest, or cloud VM — that periodically checks tamper indicators and raises off-box alerts.
 **Design rule:** one repo, identical code everywhere. Each host differs only by (a) a small human-edited per-host config file and (b) a per-host baseline captured at bootstrap. `relay-b` (the shadow-judge eval host) is **one deployment target, not the design center** — see Appendix A. The current rollout fleet is listed in §0.5.
 **Author run date:** 2026-05-20.
-**Critique pass:** CRITIQUE.md (2026-05-21) — all CRITICAL + HIGH findings folded in; see §8 and inline `C#`/`H#`/`M#`/`L#` citations.
+**Critique pass:** 2026-05-21 adversarial critique — all CRITICAL + HIGH findings folded in; see §8 and inline `C#`/`H#`/`M#`/`L#` citations.
 
 ---
 
@@ -691,7 +691,7 @@ Plus: the `onionwarden-fast.timer`/`.service` skeleton, `onionwarden-detect-prof
 
 ## 8. Decisions (resolved) & remaining ambiguity
 
-All 16 open questions were resolved by the operator on 2026-05-20 and folded into the plan. A follow-up round the same day also added two capabilities beyond the original 16 — the opt-in **fatal-action kill-switch** (§3.7) and **Phase 5** fleet config management — whose residual risks are tracked in the flags below. An adversarial critique pass (`CRITIQUE.md`, 2026-05-21) was then folded in: its 5 CRITICAL + 8 HIGH findings produced real design changes throughout, cited inline as `C#`/`H#`/`M#`/`L#`; the **Execution TODO** at the top of this doc reflects the post-critique plan. "Needs a value" means the *design* is fixed but a concrete per-deploy input must still be supplied before that host goes live — it is not an open design question.
+All 16 open questions were resolved by the operator on 2026-05-20 and folded into the plan. A follow-up round the same day also added two capabilities beyond the original 16 — the opt-in **fatal-action kill-switch** (§3.7) and **Phase 5** fleet config management — whose residual risks are tracked in the flags below. An adversarial critique pass (2026-05-21) was then folded in: its 5 CRITICAL + 8 HIGH findings produced real design changes throughout, cited inline as `C#`/`H#`/`M#`/`L#`; the **Execution TODO** at the top of this doc reflects the post-critique plan. "Needs a value" means the *design* is fixed but a concrete per-deploy input must still be supplied before that host goes live — it is not an open design question.
 
 | # | Topic | Decision (folded in at §) | Status |
 |---|---|---|---|
