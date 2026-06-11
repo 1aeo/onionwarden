@@ -20,7 +20,14 @@
 set -euo pipefail
 umask 077   # R1-F2: keep events.log + counters off other local users
 
-RECVROOT="${ONIONWARDEN_RECEIVER_ROOT:-$HOME/onionwarden}"
+_script_dir=$(cd "$(dirname "$0")" && pwd)
+if [ -n "${ONIONWARDEN_RECEIVER_ROOT:-}" ]; then
+  RECVROOT="$ONIONWARDEN_RECEIVER_ROOT"
+elif [ "$(basename "$_script_dir")" = ".bin" ]; then
+  RECVROOT=$(cd "$_script_dir/.." && pwd)
+else
+  RECVROOT="$HOME/onionwarden"
+fi
 RATE_MAX="${ONIONWARDEN_APPEND_RATE_MAX:-180}"     # max lines / host / minute
 MAX_LINE="${ONIONWARDEN_APPEND_MAX_LINE:-16384}"   # bytes
 EXPECTED_HOST="${1:-}"                              # R1-F1: optional pin

@@ -188,6 +188,31 @@ def test_suppress_clear_revokes_token(kstree):
     assert r.returncode != 0
 
 
+def test_suppress_clear_revokes_same_second_token(kstree):
+    """A clear in the token's opened_at second must still beat the replay."""
+    _write_conf(kstree)
+    tok = kstree["dir"] / "tok"
+    pinned_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    env = {**kstree["env"], "ONIONWARDEN_NOW": pinned_now}
+    subprocess.run([BASH, str(ROOT / "bin" / "onionwarden-suppress"),
+                    "request", "--reason", "visit", "--duration", "60m",
+                    "--out", str(tok)],
+                   capture_output=True, text=True, env=env, check=True)
+    sign_file(kstree["priv"], str(tok))
+    assert subprocess.run([BASH, str(ROOT / "bin" / "onionwarden-suppress"),
+                           "install", "--token", str(tok)],
+                          capture_output=True, text=True, env=env,
+                          check=False).returncode == 0
+    assert subprocess.run([BASH, str(ROOT / "bin" / "onionwarden-suppress"),
+                           "clear"],
+                          capture_output=True, text=True, env=env,
+                          check=False).returncode == 0
+    r = subprocess.run([BASH, str(ROOT / "bin" / "onionwarden-suppress"),
+                        "install", "--token", str(tok)],
+                       capture_output=True, text=True, env=env, check=False)
+    assert r.returncode != 0
+
+
 def test_suppress_rejects_replayed_old_token(kstree):
     _write_conf(kstree)
     # Install a current token, then try to install an OLDER one.
