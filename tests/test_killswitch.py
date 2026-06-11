@@ -133,9 +133,11 @@ def test_suppress_request_install_activates(kstree):
     r = _suppress(kstree, "request", "--reason", "crash cart",
                   "--duration", "30m", "--out", str(tok))
     assert r.returncode == 0 and tok.exists()
+    expires = json.loads(tok.read_text())["expires_at"]
     sign_file(kstree["priv"], str(tok))
     r = _suppress(kstree, "install", "--token", str(tok))
-    assert r.returncode == 0 and "ACTIVE" in r.stdout
+    assert r.returncode == 0
+    assert f"ACTIVE until {expires}" in r.stdout
 
 
 def test_suppress_rejects_unsigned_token(kstree):
@@ -207,6 +209,10 @@ def test_suppress_clear_revokes_same_second_token(kstree):
                            "clear"],
                           capture_output=True, text=True, env=env,
                           check=False).returncode == 0
+    # The same-second clear must leave a marker that sorts strictly after
+    # the token's opened_at, in the documented "<opened_at>~clear" form.
+    assert (kstree["var"] / "state" / "suppress_last").read_text() == (
+        f"{pinned_now}~clear")
     r = subprocess.run([BASH, str(ROOT / "bin" / "onionwarden-suppress"),
                         "install", "--token", str(tok)],
                        capture_output=True, text=True, env=env, check=False)
